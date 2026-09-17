@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "opening-tree-builder"
+version = "0.1.0"
+description = "Opening Tree Builder"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "PyQt6",
+    "python-chess",
+]
+
+[project.scripts]
+chess-app = "otb:main"
+
+# Tells hatchling where to find your single-file script
+[tool.hatch.build.targets.wheel]
+include = ["otb.py"]

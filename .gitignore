@@ -1,0 +1,6 @@
+# Exclude the virtual environment folder
+.venv/
+venv/
+
+# Exclude all binary files
+*.bin
