@@ -1,25 +1,20 @@
 #!/usr/bin/env python3
-"""
-Chess repertoire editor: board + position-keyed move list, backed by a
-Polyglot (.bin) opening book that you build as you play.
 
-Left  : chess board (rendered via chess.svg). Pieces are dragged with the
-        mouse; you can only drop them on squares that are legal targets
-        for that piece -- illegal drops just snap back.
-Right : navigation buttons (|< < >) + a list of the moves YOU have stored
-        for the current position (not all legal moves). Playing a new move
-        on the board adds it to the book for that position; right-clicking
-        an entry lets you delete it. The book file is rewritten to disk on
-        every add/delete, so it's always in sync. Hovering an entry draws
-        a yellow arrow for it on the board.
 
-Dependencies:
-    pip install python-chess PyQt6
-
-Run:
-    python chess_repertoire_gui.py [path/to/book.bin]
-    (defaults to ./book.bin if no path is given; created on first save)
-"""
+# Copyright (C) 2026 [www.gambitgear.ch]
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from __future__ import annotations
 
@@ -45,12 +40,25 @@ from PyQt6.QtCore import (
     QPropertyAnimation,
     QRectF,
     QSettings,
+    QSize,
     Qt,
     QTimer,
     pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QColor, QCursor, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import (
+    QAction,
+    QColor,
+    QCursor,
+    QIcon,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QTransform,
+)
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6.QtWidgets import (
@@ -74,7 +82,7 @@ from PyQt6.QtWidgets import (
 )
 
 MIN_BOARD_SIZE = 320   # smallest the board will shrink to
-RIGHT_PANEL_WIDTH = 260  # constant width for the nav+list panel
+RIGHT_PANEL_WIDTH = 280  # constant width for the nav+list panel
 DRAG_THRESHOLD = 6  # px of mouse movement before a press counts as a drag
 
 HOVER_ARROW_COLOR = "#ffcc00"         # yellow
@@ -88,6 +96,136 @@ TRANSPOSITION_ROW_COLOR = QColor(255, 0, 0, 55)  # translucent red overlay for m
                                                   # whose resulting position is also
                                                   # reachable via a different move order
 TARGET_SQUARE_COLOR = "#3388ff88"     # semi-transparent blue for target squares
+
+NAV_BUTTON_STYLE = "QPushButton { padding: 10px 18px; font-size: 12pt; }"
+NAV_ICON_SIZE = 22
+
+
+def _icon_color() -> QColor:
+    """Current theme's text color, so hand-drawn icons stay visible in
+    both light and dark mode instead of using a fixed color."""
+    return QApplication.palette().color(QPalette.ColorRole.WindowText)
+
+
+def _make_flip_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+    """Two antidromic (opposite-direction) arrows: one up on the left, one
+    down on the right -- reads as 'swap top and bottom', i.e. flip."""
+    color = color or _icon_color()
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    pen = QPen(color, max(1.5, size * 0.09), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(color)
+
+    margin = size * 0.12
+    head = size * 0.22
+
+    x1 = size * 0.32  # left shaft: arrow points UP
+    painter.drawLine(QPointF(x1, size - margin), QPointF(x1, margin + head * 0.5))
+    painter.drawPolygon(QPolygonF([
+        QPointF(x1 - head / 2, margin + head),
+        QPointF(x1 + head / 2, margin + head),
+        QPointF(x1, margin),
+    ]))
+
+    x2 = size * 0.68  # right shaft: arrow points DOWN
+    painter.drawLine(QPointF(x2, margin), QPointF(x2, size - margin - head * 0.5))
+    painter.drawPolygon(QPolygonF([
+        QPointF(x2 - head / 2, size - margin - head),
+        QPointF(x2 + head / 2, size - margin - head),
+        QPointF(x2, size - margin),
+    ]))
+
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _make_step_back_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+    """A single triangle pointing left -- a play button rotated 180
+    degrees -- for 'step back one move'."""
+    color = color or _icon_color()
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(color)
+
+    margin = size * 0.18
+    painter.drawPolygon(QPolygonF([
+        QPointF(size - margin, margin),
+        QPointF(size - margin, size - margin),
+        QPointF(margin, size / 2),
+    ]))
+
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _make_skip_start_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+    """A vertical bar plus a left-pointing triangle -- 'skip to start' --
+    hand-drawn like the other nav icons so all three share the exact same
+    color, rather than mixing in the OS-native icon's own shade."""
+    color = color or _icon_color()
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(color)
+
+    margin = size * 0.16
+    bar_width = size * 0.14
+    painter.drawRect(QRectF(margin, margin, bar_width, size - 2 * margin))
+    tri_left = margin + bar_width + size * 0.08
+    painter.drawPolygon(QPolygonF([
+        QPointF(size - margin, margin),
+        QPointF(size - margin, size - margin),
+        QPointF(tri_left, size / 2),
+    ]))
+
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _make_engine_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+    """A simplified engine-block silhouette, in the style of the
+    automotive 'check engine' warning light (SAE J1930) -- a block body
+    with a pointed front nose and a row of studs on top -- used in place
+    of a gear, since a gear reads as 'settings', not specifically
+    'engine'."""
+    color = color or _icon_color()
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(color)
+
+    path = QPainterPath()
+
+    body = QRectF(size * 0.16, size * 0.42, size * 0.62, size * 0.34)
+    path.addRoundedRect(body, size * 0.05, size * 0.05)
+
+    nose = QPainterPath()  # pointed front, like the dashboard icon's distributor bump
+    nose.moveTo(size * 0.16, size * 0.50)
+    nose.lineTo(size * 0.04, size * 0.59)
+    nose.lineTo(size * 0.16, size * 0.68)
+    nose.closeSubpath()
+    path = path.united(nose)
+
+    for i in range(3):  # studs on top, evenly spaced
+        x = size * (0.26 + i * 0.155)
+        stud = QPainterPath()
+        stud.addRoundedRect(QRectF(x, size * 0.26, size * 0.09, size * 0.18), size * 0.02, size * 0.02)
+        path = path.united(stud)
+
+    painter.drawPath(path)
+    painter.end()
+    return QIcon(pixmap)
 
 
 class ToggleSwitch(QAbstractButton):
@@ -107,7 +245,7 @@ class ToggleSwitch(QAbstractButton):
         super().__init__(parent)
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(44, 24)
+        self.setFixedSize(58, 32)
 
         self._knob_pos = 0.0  # 0.0 = left/off, 1.0 = right/on
         self._animation = QPropertyAnimation(self, b"knobPos", self)
@@ -782,17 +920,35 @@ class MainWindow(QMainWindow):
         self.move_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.move_list.customContextMenuRequested.connect(self._on_context_menu)
 
-        self.btn_start = QPushButton("|<")
-        self.btn_back = QPushButton("<")
-        self.btn_flip = QPushButton("Flip")
-        self.engine_label = QLabel("Engine")
+        self.btn_start = QPushButton()
+        self.btn_start.setIcon(_make_skip_start_icon())
+        self.btn_start.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
+        self.btn_start.setToolTip("Go to start")
+
+        self.btn_back = QPushButton()
+        self.btn_back.setIcon(_make_step_back_icon())
+        self.btn_back.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
+        self.btn_back.setToolTip("Step back")
+
+        self.btn_flip = QPushButton()
+        self.btn_flip.setIcon(_make_flip_icon())
+        self.btn_flip.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
+        self.btn_flip.setToolTip("Flip board")
+
+        for btn in (self.btn_start, self.btn_back, self.btn_flip):
+            btn.setStyleSheet(NAV_BUTTON_STYLE)
+
+        self.engine_label = QLabel()
+        self.engine_label.setPixmap(_make_engine_icon().pixmap(NAV_ICON_SIZE, NAV_ICON_SIZE))
+        self.engine_label.setToolTip("Engine")
         self.engine_toggle = ToggleSwitch()
+        self.engine_toggle.setToolTip("Engine")
 
         self.mode_browse_btn = QPushButton("Browse")
         self.mode_edit_btn = QPushButton("Edit")
         for btn in (self.mode_browse_btn, self.mode_edit_btn):
             btn.setCheckable(True)
-            btn.setStyleSheet("QPushButton { padding: 4px 10px; border: 1px solid #999999; }")
+            btn.setStyleSheet(NAV_BUTTON_STYLE + "QPushButton { border: 1px solid #999999; }")
         self.mode_browse_btn.setStyleSheet(
             self.mode_browse_btn.styleSheet()
             + "QPushButton:checked { background-color: #40a040; color: white; border: 1px solid #2d7a2d; }"
@@ -820,8 +976,12 @@ class MainWindow(QMainWindow):
 
         nav_row2 = QHBoxLayout()
         nav_row2.addWidget(self.btn_flip)
-        nav_row2.addWidget(self.engine_label)
-        nav_row2.addWidget(self.engine_toggle)
+        nav_row2.addStretch()
+        engine_group = QHBoxLayout()
+        engine_group.setSpacing(3)  # icon sits close against the switch
+        engine_group.addWidget(self.engine_label)
+        engine_group.addWidget(self.engine_toggle)
+        nav_row2.addLayout(engine_group)
 
         nav_row3 = QHBoxLayout()
         nav_row3.setSpacing(0)

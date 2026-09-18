@@ -21,6 +21,8 @@ You can also expand your opening tree by importing PGN-files via <kbd>File</kbd>
 Deletion is done via right-click on a move in edit-mode.   
 CAUTION: all attached branches to follow behind that node will also be also deleted.
 
+Transpositions are chess positions, that can be reached via multiple paths in the opening tree. The predecessor-moves to a transposition are marked in red in the move list on the right-hand side.
+
 ## How to Run OTB
 
 For quick evaluation and distribution the python package is managed by `uv`:   
