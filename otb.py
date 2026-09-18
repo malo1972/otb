@@ -48,6 +48,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QAction,
+    QBrush,
     QColor,
     QCursor,
     QIcon,
@@ -57,7 +58,6 @@ from PyQt6.QtGui import (
     QPen,
     QPixmap,
     QPolygonF,
-    QTransform,
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtSvgWidgets import QSvgWidget
@@ -66,6 +66,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -88,29 +89,47 @@ DRAG_THRESHOLD = 6  # px of mouse movement before a press counts as a drag
 HOVER_ARROW_COLOR = "#ffcc00"         # yellow
 ENGINE_ARROW_COLOR = "#0066ff"        # blue, continuously-updating engine best move
 DRAG_SOURCE_COLOR = "#ffff0088"       # semi-transparent yellow for start square
-HOVER_ROW_COLOR = QColor(0, 0, 0, 55)  # translucent black overlay: darkens the row a
-                                        # bit regardless of light/dark theme, since it
-                                        # blends with whatever's underneath rather than
-                                        # painting a fixed absolute grey
+HOVER_ROW_COLOR = QColor(0x88, 0x88, 0x88, 90)  # same mid-grey as button hover
+                                        # (#888888); translucent because the delegate
+                                        # paints this over the already-drawn move text,
+                                        # not behind it like a button's own background
 TRANSPOSITION_ROW_COLOR = QColor(255, 0, 0, 55)  # translucent red overlay for moves
                                                   # whose resulting position is also
                                                   # reachable via a different move order
 TARGET_SQUARE_COLOR = "#3388ff88"     # semi-transparent blue for target squares
 
-NAV_BUTTON_STYLE = "QPushButton { padding: 10px 18px; font-size: 12pt; }"
+NAV_BUTTON_STYLE = (
+    "QPushButton { padding: 10px 18px; font-size: 12pt; }"
+    "QPushButton:hover:enabled { background-color: #888888; }"
+)
 NAV_ICON_SIZE = 22
+ENGINE_ICON_SIZE = 32  # matches ToggleSwitch's fixed height (58x32)
 
 
 def _icon_color() -> QColor:
     """Current theme's text color, so hand-drawn icons stay visible in
-    both light and dark mode instead of using a fixed color."""
+    both light and dark mode instead of using a fixed color. Also used
+    for the move-list text, so button symbols and move text match."""
     return QApplication.palette().color(QPalette.ColorRole.WindowText)
 
 
-def _make_flip_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+def _build_dual_icon(draw_fn, size: int, color: QColor | None) -> QIcon:
+    """Build a QIcon with an explicit, faint ('shallow') Disabled-mode
+    pixmap alongside the normal one. Qt's automatic disabled-icon
+    generation doesn't fade a solid custom silhouette very noticeably, so
+    a disabled nav button doesn't read as clearly inactive without this."""
+    color = color or _icon_color()
+    icon = QIcon()
+    icon.addPixmap(draw_fn(size, color), QIcon.Mode.Normal)
+    faint = QColor(color)
+    faint.setAlpha(60)
+    icon.addPixmap(draw_fn(size, faint), QIcon.Mode.Disabled)
+    return icon
+
+
+def _draw_flip_pixmap(size: int, color: QColor) -> QPixmap:
     """Two antidromic (opposite-direction) arrows: one up on the left, one
     down on the right -- reads as 'swap top and bottom', i.e. flip."""
-    color = color or _icon_color()
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -140,13 +159,16 @@ def _make_flip_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> Q
     ]))
 
     painter.end()
-    return QIcon(pixmap)
+    return pixmap
 
 
-def _make_step_back_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+def _make_flip_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+    return _build_dual_icon(_draw_flip_pixmap, size, color)
+
+
+def _draw_step_back_pixmap(size: int, color: QColor) -> QPixmap:
     """A single triangle pointing left -- a play button rotated 180
     degrees -- for 'step back one move'."""
-    color = color or _icon_color()
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -162,14 +184,17 @@ def _make_step_back_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None)
     ]))
 
     painter.end()
-    return QIcon(pixmap)
+    return pixmap
 
 
-def _make_skip_start_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+def _make_step_back_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+    return _build_dual_icon(_draw_step_back_pixmap, size, color)
+
+
+def _draw_skip_start_pixmap(size: int, color: QColor) -> QPixmap:
     """A vertical bar plus a left-pointing triangle -- 'skip to start' --
     hand-drawn like the other nav icons so all three share the exact same
     color, rather than mixing in the OS-native icon's own shade."""
-    color = color or _icon_color()
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -188,7 +213,11 @@ def _make_skip_start_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None
     ]))
 
     painter.end()
-    return QIcon(pixmap)
+    return pixmap
+
+
+def _make_skip_start_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+    return _build_dual_icon(_draw_skip_start_pixmap, size, color)
 
 
 def _make_engine_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
@@ -196,7 +225,9 @@ def _make_engine_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) ->
     automotive 'check engine' warning light (SAE J1930) -- a block body
     with a pointed front nose and a row of studs on top -- used in place
     of a gear, since a gear reads as 'settings', not specifically
-    'engine'."""
+    'engine'. Proportioned to use nearly the full canvas height (net
+    visible height close to the toggle switch's height), not just a thin
+    middle band."""
     color = color or _icon_color()
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
@@ -207,20 +238,20 @@ def _make_engine_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) ->
 
     path = QPainterPath()
 
-    body = QRectF(size * 0.16, size * 0.42, size * 0.62, size * 0.34)
+    body = QRectF(size * 0.16, size * 0.34, size * 0.62, size * 0.60)
     path.addRoundedRect(body, size * 0.05, size * 0.05)
 
     nose = QPainterPath()  # pointed front, like the dashboard icon's distributor bump
-    nose.moveTo(size * 0.16, size * 0.50)
-    nose.lineTo(size * 0.04, size * 0.59)
-    nose.lineTo(size * 0.16, size * 0.68)
+    nose.moveTo(size * 0.16, size * 0.48)
+    nose.lineTo(size * 0.04, size * 0.64)
+    nose.lineTo(size * 0.16, size * 0.80)
     nose.closeSubpath()
     path = path.united(nose)
 
     for i in range(3):  # studs on top, evenly spaced
         x = size * (0.26 + i * 0.155)
         stud = QPainterPath()
-        stud.addRoundedRect(QRectF(x, size * 0.26, size * 0.09, size * 0.18), size * 0.02, size * 0.02)
+        stud.addRoundedRect(QRectF(x, size * 0.06, size * 0.09, size * 0.32), size * 0.02, size * 0.02)
         path = path.united(stud)
 
     painter.drawPath(path)
@@ -939,7 +970,7 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet(NAV_BUTTON_STYLE)
 
         self.engine_label = QLabel()
-        self.engine_label.setPixmap(_make_engine_icon().pixmap(NAV_ICON_SIZE, NAV_ICON_SIZE))
+        self.engine_label.setPixmap(_make_engine_icon(ENGINE_ICON_SIZE).pixmap(ENGINE_ICON_SIZE, ENGINE_ICON_SIZE))
         self.engine_label.setToolTip("Engine")
         self.engine_toggle = ToggleSwitch()
         self.engine_toggle.setToolTip("Engine")
@@ -970,18 +1001,19 @@ class MainWindow(QMainWindow):
         self.mode_browse_btn.clicked.connect(lambda: self._set_mode("BROWSE"))
         self.mode_edit_btn.clicked.connect(lambda: self._set_mode("EDIT"))
 
-        nav_row1 = QHBoxLayout()
-        nav_row1.addWidget(self.btn_start)
-        nav_row1.addWidget(self.btn_back)
-
-        nav_row2 = QHBoxLayout()
-        nav_row2.addWidget(self.btn_flip)
-        nav_row2.addStretch()
+        nav_grid = QGridLayout()
+        nav_grid.setHorizontalSpacing(6)
+        nav_grid.setVerticalSpacing(6)
+        nav_grid.addWidget(self.btn_start, 0, 0)
+        nav_grid.addWidget(self.btn_back, 0, 1)
+        nav_grid.addWidget(self.btn_flip, 1, 0)
         engine_group = QHBoxLayout()
         engine_group.setSpacing(3)  # icon sits close against the switch
         engine_group.addWidget(self.engine_label)
         engine_group.addWidget(self.engine_toggle)
-        nav_row2.addLayout(engine_group)
+        nav_grid.addLayout(
+            engine_group, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
 
         nav_row3 = QHBoxLayout()
         nav_row3.setSpacing(0)
@@ -989,8 +1021,7 @@ class MainWindow(QMainWindow):
         nav_row3.addWidget(self.mode_edit_btn)
 
         right = QVBoxLayout()
-        right.addLayout(nav_row1)
-        right.addLayout(nav_row2)
+        right.addLayout(nav_grid)
         right.addLayout(nav_row3)
         right.addWidget(self.move_list)
         right_widget = QWidget()
@@ -1387,6 +1418,8 @@ class MainWindow(QMainWindow):
         self._populate_move_list()
         self._update_status()
         self.board_widget.redraw()
+        self.btn_start.setEnabled(self.ply > 0)
+        self.btn_back.setEnabled(self.ply > 0)
         if self.engine_active and self.engine_worker is not None:
             self.board_widget.set_engine_arrow(None)
             self.engine_worker.start(self.board)
@@ -1409,6 +1442,7 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, entry)
             item.setData(MoveItemDelegate.TRANSPOSITION_ROLE, is_transposition)
+            item.setForeground(QBrush(_icon_color()))
             self.move_list.addItem(item)
 
     def _update_status(self):
