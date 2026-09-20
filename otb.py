@@ -51,6 +51,7 @@ from PyQt6.QtGui import (
     QBrush,
     QColor,
     QCursor,
+    QFont,
     QIcon,
     QPainter,
     QPainterPath,
@@ -64,7 +65,6 @@ from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QApplication,
-    QButtonGroup,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -354,6 +354,100 @@ class ToggleSwitch(QAbstractButton):
             path.lineTo(center_x - symbol_size * 0.1, center_y + symbol_size * 0.4)
             path.lineTo(center_x + symbol_size * 0.45, center_y - symbol_size * 0.35)
             painter.drawPath(path)
+
+
+class ModeSwitch(QAbstractButton):
+    """Wide Browse/Edit switch: grey track (inactive background); the
+    knob itself is the colored element, sliding between green (Browse,
+    the default) and red (Edit). Both labels are always visible, with
+    only font weight (bold vs light) distinguishing the selected side,
+    per spec. Sized to fill whatever width its layout slot gives it (see
+    MainWindow: it spans the same two grid columns as the start/back
+    buttons), not a fixed pixel width."""
+
+    TRACK_COLOR = QColor("#bbbbbb")       # grey: inactive background
+    KNOB_OFF_COLOR = QColor("#40a040")    # green: Browse
+    KNOB_ON_COLOR = QColor("#a04040")     # red: Edit
+    TEXT_COLOR = QColor("#ffffff")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self._knob_pos = 0.0  # 0.0 = left/Browse, 1.0 = right/Edit
+        self._animation = QPropertyAnimation(self, b"knobPos", self)
+        self._animation.setDuration(150)
+        self._animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self.toggled.connect(self._animate_to_state)
+
+    def _animate_to_state(self, checked: bool):
+        self._animation.stop()
+        self._animation.setStartValue(self._knob_pos)
+        self._animation.setEndValue(1.0 if checked else 0.0)
+        self._animation.start()
+
+    def _get_knob_pos(self) -> float:
+        return self._knob_pos
+
+    def _set_knob_pos(self, value: float):
+        self._knob_pos = value
+        self.update()
+
+    knobPos = pyqtProperty(float, _get_knob_pos, _set_knob_pos)
+
+    @staticmethod
+    def _blend(c1: QColor, c2: QColor, t: float) -> QColor:
+        t = max(0.0, min(1.0, t))
+        return QColor(
+            int(c1.red() + (c2.red() - c1.red()) * t),
+            int(c1.green() + (c2.green() - c1.green()) * t),
+            int(c1.blue() + (c2.blue() - c1.blue()) * t),
+        )
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        radius = rect.height() / 2
+
+        painter.setPen(self.TRACK_COLOR.darker(115))
+        painter.setBrush(self.TRACK_COLOR)
+        painter.drawRoundedRect(rect, radius, radius)
+
+        half_w = rect.width() / 2
+        margin = 3.0
+        knob_rect = QRectF(
+            rect.left() + margin + self._knob_pos * half_w,
+            rect.top() + margin,
+            half_w - 2 * margin,
+            rect.height() - 2 * margin,
+        )
+        knob_color = self._blend(self.KNOB_OFF_COLOR, self.KNOB_ON_COLOR, self._knob_pos)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(knob_color)
+        painter.drawRoundedRect(knob_rect, knob_rect.height() / 2, knob_rect.height() / 2)
+
+        bold_font = QFont(self.font())
+        bold_font.setPixelSize(NAV_ICON_SIZE)
+        bold_font.setBold(True)
+        light_font = QFont(self.font())
+        light_font.setPixelSize(NAV_ICON_SIZE)
+        light_font.setBold(False)
+        light_font.setWeight(QFont.Weight.Light)
+
+        browse_rect = QRectF(rect.left(), rect.top(), half_w, rect.height())
+        edit_rect = QRectF(rect.left() + half_w, rect.top(), half_w, rect.height())
+        browse_selected = self._knob_pos < 0.5
+
+        painter.setPen(self.TEXT_COLOR)
+        painter.setFont(bold_font if browse_selected else light_font)
+        painter.drawText(browse_rect, Qt.AlignmentFlag.AlignCenter, "Browse")
+        painter.setFont(light_font if browse_selected else bold_font)
+        painter.drawText(edit_rect, Qt.AlignmentFlag.AlignCenter, "Edit")
+
 
 # Mode board color schemes: {"square light": ..., "square dark": ...}
 BOARD_COLORS = {
@@ -975,54 +1069,39 @@ class MainWindow(QMainWindow):
         self.engine_toggle = ToggleSwitch()
         self.engine_toggle.setToolTip("Engine")
 
-        self.mode_browse_btn = QPushButton("Browse")
-        self.mode_edit_btn = QPushButton("Edit")
-        for btn in (self.mode_browse_btn, self.mode_edit_btn):
-            btn.setCheckable(True)
-            btn.setStyleSheet(NAV_BUTTON_STYLE + "QPushButton { border: 1px solid #999999; }")
-        self.mode_browse_btn.setStyleSheet(
-            self.mode_browse_btn.styleSheet()
-            + "QPushButton:checked { background-color: #40a040; color: white; border: 1px solid #2d7a2d; }"
-        )
-        self.mode_edit_btn.setStyleSheet(
-            self.mode_edit_btn.styleSheet()
-            + "QPushButton:checked { background-color: #a04040; color: white; border: 1px solid #7a2d2d; }"
-        )
-        self.mode_button_group = QButtonGroup(self)
-        self.mode_button_group.setExclusive(True)
-        self.mode_button_group.addButton(self.mode_browse_btn)
-        self.mode_button_group.addButton(self.mode_edit_btn)
-        self.mode_browse_btn.setChecked(True)  # matches the default self.mode == "BROWSE"
+        self.mode_switch = ModeSwitch()
+        self.mode_switch.setToolTip("Browse / Edit mode")
+
+        nav_button_height = self.btn_start.sizeHint().height()
+        self.mode_switch.setFixedHeight(nav_button_height)
+        self.engine_toggle.setFixedSize(int(nav_button_height * 1.9), nav_button_height)
+        # self.mode == "BROWSE" is the default; knob starts unchecked/left (green)
 
         self.btn_start.clicked.connect(self.goto_start)
         self.btn_back.clicked.connect(self.step_back)
         self.btn_flip.clicked.connect(self.board_widget.flip)
         self.engine_toggle.toggled.connect(self._on_engine_toggle_changed)
-        self.mode_browse_btn.clicked.connect(lambda: self._set_mode("BROWSE"))
-        self.mode_edit_btn.clicked.connect(lambda: self._set_mode("EDIT"))
+        self.mode_switch.toggled.connect(lambda checked: self._set_mode("EDIT" if checked else "BROWSE"))
 
         nav_grid = QGridLayout()
         nav_grid.setHorizontalSpacing(6)
         nav_grid.setVerticalSpacing(6)
-        nav_grid.addWidget(self.btn_start, 0, 0)
-        nav_grid.addWidget(self.btn_back, 0, 1)
-        nav_grid.addWidget(self.btn_flip, 1, 0)
+        # spans both columns, so it's exactly as wide as start+back combined
+        nav_grid.addWidget(self.mode_switch, 0, 0, 1, 2)
+        nav_grid.addWidget(self.btn_start, 1, 0)
+        nav_grid.addWidget(self.btn_back, 1, 1)
+        nav_grid.addWidget(self.btn_flip, 2, 0)
         engine_group = QHBoxLayout()
         engine_group.setSpacing(3)  # icon sits close against the switch
         engine_group.addWidget(self.engine_label)
         engine_group.addWidget(self.engine_toggle)
         nav_grid.addLayout(
-            engine_group, 1, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            engine_group, 2, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
 
-        nav_row3 = QHBoxLayout()
-        nav_row3.setSpacing(0)
-        nav_row3.addWidget(self.mode_browse_btn)
-        nav_row3.addWidget(self.mode_edit_btn)
-
         right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
         right.addLayout(nav_grid)
-        right.addLayout(nav_row3)
         right.addWidget(self.move_list)
         right_widget = QWidget()
         right_widget.setLayout(right)
