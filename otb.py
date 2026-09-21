@@ -1129,10 +1129,9 @@ class MainWindow(QMainWindow):
 
         nav_button_height = self.btn_start.sizeHint().height()
         self.mode_switch.setFixedHeight(nav_button_height)
-        self.engine_toggle.setFixedSize(int(nav_button_height * 1.9), nav_button_height)
-        self.engine_label.setPixmap(
-            _make_engine_icon(nav_button_height).pixmap(nav_button_height, nav_button_height)
-        )
+        engine_size = int(nav_button_height * 0.8)  # scaled down to 80% of the button height
+        self.engine_toggle.setFixedSize(int(engine_size * 1.9), engine_size)
+        self.engine_label.setPixmap(_make_engine_icon(engine_size).pixmap(engine_size, engine_size))
         # self.mode == "BROWSE" is the default; knob starts unchecked/left (green)
 
         self.btn_start.clicked.connect(self.goto_start)
@@ -1150,10 +1149,11 @@ class MainWindow(QMainWindow):
         nav_grid.addWidget(self.btn_back, 1, 1)
         nav_grid.addWidget(self.btn_flip, 2, 0)
         engine_group = QHBoxLayout()
+        engine_group.addStretch()  # icon centered in the free space left of the toggle
         engine_group.addWidget(self.engine_label)
-        engine_group.addStretch()  # icon pinned left, switch pinned right
+        engine_group.addStretch()  # switch stays pinned right
         engine_group.addWidget(self.engine_toggle)
-        nav_grid.addLayout(engine_group, 2, 1)  # fills the cell: matches btn_back's left/right edges
+        nav_grid.addLayout(engine_group, 2, 1, alignment=Qt.AlignmentFlag.AlignVCenter)  # fills width, centered vertically with btn_flip
 
         # Without this, column 1 (btn_back + engine_group) would size itself
         # wider than column 0 (btn_start/btn_flip alone), since the engine
@@ -1161,8 +1161,12 @@ class MainWindow(QMainWindow):
         # btn_back to match and breaking "all three buttons same size".
         # Forcing both columns to the same explicit minimum keeps every
         # button identical while still giving the engine group enough room.
-        engine_group_width = self.engine_label.sizeHint().width() + 6 + self.engine_toggle.width()
-        column_width = max(self.btn_start.sizeHint().width(), engine_group_width)
+        # Uses the full-size (pre-shrink) engine footprint deliberately: the
+        # actual displayed engine toggle is smaller (see engine_size above),
+        # but the column width itself must stay independent of that, or
+        # shrinking the toggle would shrink the buttons back down too.
+        full_engine_width = nav_button_height + 6 + int(nav_button_height * 1.9)
+        column_width = max(self.btn_start.sizeHint().width(), full_engine_width)
         nav_grid.setColumnMinimumWidth(0, column_width)
         nav_grid.setColumnMinimumWidth(1, column_width)
 
