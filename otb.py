@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import struct
@@ -103,7 +104,6 @@ NAV_BUTTON_STYLE = (
     "QPushButton:hover:enabled { background-color: #888888; }"
 )
 NAV_ICON_SIZE = 22
-ENGINE_ICON_SIZE = 32  # matches ToggleSwitch's fixed height (58x32)
 
 
 def _icon_color() -> QColor:
@@ -220,43 +220,76 @@ def _make_skip_start_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None
     return _build_dual_icon(_draw_skip_start_pixmap, size, color)
 
 
+ENGINE_ICON_PNG_B64 = (
+    "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"
+    "SUVORK5CYII="
+)
+
+
 def _make_engine_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
-    """A simplified engine-block silhouette, in the style of the
-    automotive 'check engine' warning light (SAE J1930) -- a block body
-    with a pointed front nose and a row of studs on top -- used in place
-    of a gear, since a gear reads as 'settings', not specifically
-    'engine'. Proportioned to use nearly the full canvas height (net
-    visible height close to the toggle switch's height), not just a thin
-    middle band."""
+    """The standard automotive 'check engine' dashboard warning light
+    glyph (embedded PNG artwork, recolored at paint time), rather than a
+    hand-drawn approximation. Recoloring uses CompositionMode_SourceIn:
+    draw the source artwork, then fill with the target color -- the fill
+    only lands where the artwork's own alpha is non-zero, so its exact
+    silhouette (including antialiased edges) is preserved, just tinted
+    to whatever _icon_color() says for the current light/dark theme."""
     color = color or _icon_color()
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(color)
 
-    path = QPainterPath()
+    src = QPixmap()
+    src.loadFromData(base64.b64decode(ENGINE_ICON_PNG_B64), "PNG")
+    src = src.scaled(
+        size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+    )
 
-    body = QRectF(size * 0.16, size * 0.34, size * 0.62, size * 0.60)
-    path.addRoundedRect(body, size * 0.05, size * 0.05)
-
-    nose = QPainterPath()  # pointed front, like the dashboard icon's distributor bump
-    nose.moveTo(size * 0.16, size * 0.48)
-    nose.lineTo(size * 0.04, size * 0.64)
-    nose.lineTo(size * 0.16, size * 0.80)
-    nose.closeSubpath()
-    path = path.united(nose)
-
-    for i in range(3):  # studs on top, evenly spaced
-        x = size * (0.26 + i * 0.155)
-        stud = QPainterPath()
-        stud.addRoundedRect(QRectF(x, size * 0.06, size * 0.09, size * 0.32), size * 0.02, size * 0.02)
-        path = path.united(stud)
-
-    painter.drawPath(path)
+    result = QPixmap(src.size())
+    result.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(result)
+    painter.drawPixmap(0, 0, src)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(result.rect(), color)
     painter.end()
-    return QIcon(pixmap)
+
+    return QIcon(result)
 
 
 class ToggleSwitch(QAbstractButton):
@@ -279,6 +312,7 @@ class ToggleSwitch(QAbstractButton):
         self.setFixedSize(58, 32)
 
         self._knob_pos = 0.0  # 0.0 = left/off, 1.0 = right/on
+        self._hovered = False
         self._animation = QPropertyAnimation(self, b"knobPos", self)
         self._animation.setDuration(150)
         self._animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
@@ -289,6 +323,16 @@ class ToggleSwitch(QAbstractButton):
         self._animation.setStartValue(self._knob_pos)
         self._animation.setEndValue(1.0 if checked else 0.0)
         self._animation.start()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
 
     def _get_knob_pos(self) -> float:
         return self._knob_pos
@@ -315,8 +359,9 @@ class ToggleSwitch(QAbstractButton):
         rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         radius = rect.height() / 2
 
+        track_off = self.TRACK_OFF_COLOR.darker(120) if self._hovered else self.TRACK_OFF_COLOR
         painter.setPen(self.BORDER_COLOR)
-        painter.setBrush(self._blend(self.TRACK_OFF_COLOR, self.TRACK_ON_COLOR, self._knob_pos))
+        painter.setBrush(self._blend(track_off, self.TRACK_ON_COLOR, self._knob_pos))
         painter.drawRoundedRect(rect, radius, radius)
 
         knob_diameter = rect.height() - 4
@@ -368,7 +413,6 @@ class ModeSwitch(QAbstractButton):
     TRACK_COLOR = QColor("#bbbbbb")       # grey: inactive background
     KNOB_OFF_COLOR = QColor("#40a040")    # green: Browse
     KNOB_ON_COLOR = QColor("#a04040")     # red: Edit
-    TEXT_COLOR = QColor("#ffffff")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -377,6 +421,7 @@ class ModeSwitch(QAbstractButton):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self._knob_pos = 0.0  # 0.0 = left/Browse, 1.0 = right/Edit
+        self._hovered = False
         self._animation = QPropertyAnimation(self, b"knobPos", self)
         self._animation.setDuration(150)
         self._animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
@@ -387,6 +432,16 @@ class ModeSwitch(QAbstractButton):
         self._animation.setStartValue(self._knob_pos)
         self._animation.setEndValue(1.0 if checked else 0.0)
         self._animation.start()
+
+    def enterEvent(self, event):
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
 
     def _get_knob_pos(self) -> float:
         return self._knob_pos
@@ -413,8 +468,9 @@ class ModeSwitch(QAbstractButton):
         rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         radius = rect.height() / 2
 
-        painter.setPen(self.TRACK_COLOR.darker(115))
-        painter.setBrush(self.TRACK_COLOR)
+        track_color = self.TRACK_COLOR.darker(120) if self._hovered else self.TRACK_COLOR
+        painter.setPen(track_color.darker(115))
+        painter.setBrush(track_color)
         painter.drawRoundedRect(rect, radius, radius)
 
         half_w = rect.width() / 2
@@ -442,7 +498,7 @@ class ModeSwitch(QAbstractButton):
         edit_rect = QRectF(rect.left() + half_w, rect.top(), half_w, rect.height())
         browse_selected = self._knob_pos < 0.5
 
-        painter.setPen(self.TEXT_COLOR)
+        painter.setPen(_icon_color())
         painter.setFont(bold_font if browse_selected else light_font)
         painter.drawText(browse_rect, Qt.AlignmentFlag.AlignCenter, "Browse")
         painter.setFont(light_font if browse_selected else bold_font)
@@ -1064,7 +1120,6 @@ class MainWindow(QMainWindow):
             btn.setStyleSheet(NAV_BUTTON_STYLE)
 
         self.engine_label = QLabel()
-        self.engine_label.setPixmap(_make_engine_icon(ENGINE_ICON_SIZE).pixmap(ENGINE_ICON_SIZE, ENGINE_ICON_SIZE))
         self.engine_label.setToolTip("Engine")
         self.engine_toggle = ToggleSwitch()
         self.engine_toggle.setToolTip("Engine")
@@ -1075,6 +1130,9 @@ class MainWindow(QMainWindow):
         nav_button_height = self.btn_start.sizeHint().height()
         self.mode_switch.setFixedHeight(nav_button_height)
         self.engine_toggle.setFixedSize(int(nav_button_height * 1.9), nav_button_height)
+        self.engine_label.setPixmap(
+            _make_engine_icon(nav_button_height).pixmap(nav_button_height, nav_button_height)
+        )
         # self.mode == "BROWSE" is the default; knob starts unchecked/left (green)
 
         self.btn_start.clicked.connect(self.goto_start)
@@ -1092,12 +1150,21 @@ class MainWindow(QMainWindow):
         nav_grid.addWidget(self.btn_back, 1, 1)
         nav_grid.addWidget(self.btn_flip, 2, 0)
         engine_group = QHBoxLayout()
-        engine_group.setSpacing(3)  # icon sits close against the switch
         engine_group.addWidget(self.engine_label)
+        engine_group.addStretch()  # icon pinned left, switch pinned right
         engine_group.addWidget(self.engine_toggle)
-        nav_grid.addLayout(
-            engine_group, 2, 1, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
+        nav_grid.addLayout(engine_group, 2, 1)  # fills the cell: matches btn_back's left/right edges
+
+        # Without this, column 1 (btn_back + engine_group) would size itself
+        # wider than column 0 (btn_start/btn_flip alone), since the engine
+        # group needs more room than a single icon-only button -- stretching
+        # btn_back to match and breaking "all three buttons same size".
+        # Forcing both columns to the same explicit minimum keeps every
+        # button identical while still giving the engine group enough room.
+        engine_group_width = self.engine_label.sizeHint().width() + 6 + self.engine_toggle.width()
+        column_width = max(self.btn_start.sizeHint().width(), engine_group_width)
+        nav_grid.setColumnMinimumWidth(0, column_width)
+        nav_grid.setColumnMinimumWidth(1, column_width)
 
         right = QVBoxLayout()
         right.setContentsMargins(0, 0, 0, 0)
@@ -1120,6 +1187,7 @@ class MainWindow(QMainWindow):
         # whenever a menu opens/closes (the menu pushes its own status tip).
         # A permanent widget is untouched by that, so the status text stays.
         self.status_label = QLabel()
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.statusBar().addWidget(self.status_label, 1)
         size_grip = ManualSizeGrip(self)
         self.statusBar().addPermanentWidget(size_grip)
