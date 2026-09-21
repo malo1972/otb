@@ -7,7 +7,7 @@
 
 **OTB** stands for "**O**pening **T**ree **B**uilder". I know this acronym is occupied, it's a tribute to "Over The Board" chess &#128521;
 
-OTB lets you build and save your opening repertoire in a single polyglot file.    
+OTB lets you build and save your opening repertoire to a single polyglot file.    
 The polyglot format has many advantages over PGN: interchangeability with other tools like SCID, easy detection of transpositions, weigthing of branches and many more:  
 https://chessprogramming.org/PolyGlot
 
@@ -28,7 +28,7 @@ Transpositions are chess positions, that can be reached via multiple paths in th
 For quick evaluation and distribution the python package is managed by `uv`:   
 https://docs.astral.sh/uv/
 
-Installers will follow soon for every OS...
+Installers will follow soon be added for every OS...
 
 ### Download the project from github into a project-folder of your choice
 * `otb.py` : the single-file python code 
@@ -67,6 +67,7 @@ Then set the location of the engine's executable via <kbd>File</kbd> &rarr; <kbd
 
 
 ## Features to wish for
-* edit weight for each move via context menu and sort the list by that value
-* when hitting a transposition, show the multiple paths how to get there
-* you name it...
+* Edit weight for each move via context menu and sort the list by that value
+* When hitting a transposition, show the multiple paths how to get there
+* Add comments to moves
+* You name it. please let me know features that you would like to see implemented
