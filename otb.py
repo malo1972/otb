@@ -69,6 +69,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -1549,17 +1550,32 @@ class MainWindow(QMainWindow):
 
     def _on_context_menu(self, pos):
         if self.mode != "BUILD":
-            return  # View mode: read-only, no delete available
+            return  # View mode: read-only, no context menu
         item = self.move_list.itemAt(pos)
         if item is None:
             return
         menu = QMenu(self)
+        edit_weight_action = menu.addAction("Edit weight")
         delete_action = menu.addAction("Delete")
         chosen = menu.exec(self.move_list.mapToGlobal(pos))
-        if chosen != delete_action:
-            return
-
         entry: BookEntry = item.data(Qt.ItemDataRole.UserRole)
+        if chosen == edit_weight_action:
+            self._edit_weight(entry)
+        elif chosen == delete_action:
+            self._delete_move(entry)
+
+    def _edit_weight(self, entry: BookEntry):
+        # polyglot stores the weight as an unsigned 16-bit value
+        weight, ok = QInputDialog.getInt(
+            self, "Edit weight", "Weight:", entry.weight, 1, 0xFFFF
+        )
+        if not ok or weight == entry.weight:
+            return
+        entry.weight = weight
+        save_book(self.book_path, self.book_entries)
+        self.refresh()
+
+    def _delete_move(self, entry: BookEntry):
         move = decode_move(self.board, entry)
         if move is None:
             self.book_entries.remove(entry)
@@ -1618,7 +1634,7 @@ class MainWindow(QMainWindow):
             move = decode_move(self.board, entry)
             if move is None:
                 continue
-            label = self.board.san(move)
+            label = f"{self.board.san(move)} ({entry.weight})"
             is_transposition = entry.resulting_key in transposition_keys
 
             item = QListWidgetItem(label)

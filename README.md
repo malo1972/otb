@@ -19,7 +19,8 @@ The currently used book and further status information is displayed in the botto
 You can also expand your opening tree by importing PGN-files via <kbd>File</kbd> &rarr;   <kbd>Import PGN...</kbd> (e.g. PGN's that you exported from other tools).
 
 Deletion is done via right-click on a move in build-mode.   
-CAUTION: all attached branches to follow behind that node will also be also deleted.
+CAUTION: all attached branches to follow behind that node will also be also deleted.   
+Right-click also lets you edit a move's weight (how often it is chosen by engines/GUIs using the book).   
 
 Transpositions are chess positions, that can be reached via multiple paths in the opening tree. The predecessor-moves to a transposition are marked in red in the move list on the right-hand side.
 
@@ -67,7 +68,6 @@ Then set the location of the engine's executable via <kbd>File</kbd> &rarr; <kbd
 
 
 ## Features to wish for
-* Edit weight for each move via context menu and sort the list by that value
 * When hitting a transposition, show the multiple paths how to get there
 * Add comments to moves
 * You name it. please let me know features that you would like to see implemented
