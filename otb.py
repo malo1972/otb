@@ -66,6 +66,8 @@ from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QApplication,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -1073,6 +1075,47 @@ class ManualSizeGrip(QWidget):
             event.accept()
 
 
+class TranspositionsDialog(QDialog):
+    """Lists every move order from the starting position to a transposition,
+    one PGN movetext line per row. Right-click copies a line (or all)."""
+
+    def __init__(self, lines: list[str], truncated: bool, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Transpositions")
+        self.resize(560, 300)
+
+        self.list_widget = QListWidget()
+        self.list_widget.addItems(lines)
+        self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._on_context_menu)
+
+        layout = QVBoxLayout(self)
+        caption = f"{len(lines)} move order(s) lead to this position"
+        if truncated:
+            caption += f" (only the first {len(lines)} shown)"
+        layout.addWidget(QLabel(caption + ". Right-click a line to copy it."))
+        layout.addWidget(self.list_widget)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_context_menu(self, pos):
+        item = self.list_widget.itemAt(pos)
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy") if item is not None else None
+        copy_all_action = menu.addAction("Copy all")
+        chosen = menu.exec(self.list_widget.mapToGlobal(pos))
+        clipboard = QApplication.clipboard()
+        if chosen is None:
+            return
+        if chosen == copy_action:
+            clipboard.setText(f"{item.text()} *\n")  # '*' = PGN result terminator (unknown)
+        elif chosen == copy_all_action:
+            # one PGN game per line, separated by blank lines
+            texts = [self.list_widget.item(i).text() for i in range(self.list_widget.count())]
+            clipboard.setText("\n\n".join(f"{t} *" for t in texts) + "\n")
+
+
 # --------------------------------------------------------------------------
 # Main window
 # --------------------------------------------------------------------------
@@ -1548,18 +1591,80 @@ class MainWindow(QMainWindow):
         walk(board_after_move)
         return collected
 
+    def _move_lists_to(self, target_key: int, limit: int = 500) -> tuple[list[list[chess.Move]], bool]:
+        """All move sequences from the starting position to target_key,
+        found by walking resulting_key edges backwards. Returns at most
+        `limit` lines (path counts can explode combinatorially) plus a flag
+        telling whether the result was truncated."""
+        start_key = chess.polyglot.zobrist_hash(chess.Board())
+        entries_by_result: dict[int, list[BookEntry]] = {}
+        for e in self.book_entries:
+            if e.resulting_key is not None:
+                entries_by_result.setdefault(e.resulting_key, []).append(e)
+
+        paths: list[list[BookEntry]] = []
+        on_path: set[int] = set()
+        reversed_path: list[BookEntry] = []
+
+        def walk(key: int) -> bool:
+            # returns False once the limit is hit, to stop the whole search
+            if key == start_key:
+                paths.append(list(reversed(reversed_path)))
+                return len(paths) < limit
+            on_path.add(key)  # guards against cycles (e.g. Nf3 Nf6 Ng1 Ng8)
+            for e in entries_by_result.get(key, []):
+                if e.key in on_path:
+                    continue
+                reversed_path.append(e)
+                keep_going = walk(e.key)
+                reversed_path.pop()
+                if not keep_going:
+                    on_path.discard(key)
+                    return False
+            on_path.discard(key)
+            return True
+
+        truncated = not walk(target_key)
+
+        move_lists: list[list[chess.Move]] = []
+        for path in paths:
+            board = chess.Board()
+            moves: list[chess.Move] = []
+            for e in path:
+                move = decode_move(board, e)
+                if move is None:
+                    break  # stale/colliding entry -- drop this line
+                moves.append(move)
+                board.push(move)
+            else:
+                move_lists.append(moves)
+        return move_lists, truncated
+
+    def _show_transpositions(self, entry: BookEntry):
+        move_lists, truncated = self._move_lists_to(entry.resulting_key)
+        lines = sorted(chess.Board().variation_san(moves) for moves in move_lists)
+        TranspositionsDialog(lines, truncated, self).exec()
+
     def _on_context_menu(self, pos):
-        if self.mode != "BUILD":
-            return  # View mode: read-only, no context menu
         item = self.move_list.itemAt(pos)
         if item is None:
             return
-        menu = QMenu(self)
-        edit_weight_action = menu.addAction("Edit weight")
-        delete_action = menu.addAction("Delete")
-        chosen = menu.exec(self.move_list.mapToGlobal(pos))
         entry: BookEntry = item.data(Qt.ItemDataRole.UserRole)
-        if chosen == edit_weight_action:
+        menu = QMenu(self)
+        show_transpositions_action = edit_weight_action = delete_action = None
+        if item.data(MoveItemDelegate.TRANSPOSITION_ROLE):
+            show_transpositions_action = menu.addAction("Transpositions")
+        if self.mode == "BUILD":  # View mode: read-only, no editing actions
+            edit_weight_action = menu.addAction("Edit weight")
+            delete_action = menu.addAction("Delete")
+        if menu.isEmpty():
+            return
+        chosen = menu.exec(self.move_list.mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen == show_transpositions_action:
+            self._show_transpositions(entry)
+        elif chosen == edit_weight_action:
             self._edit_weight(entry)
         elif chosen == delete_action:
             self._delete_move(entry)

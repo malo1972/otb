@@ -22,7 +22,8 @@ Deletion is done via right-click on a move in build-mode.
 CAUTION: all attached branches to follow behind that node will also be also deleted.   
 Right-click also lets you edit a move's weight (how often it is chosen by engines/GUIs using the book).   
 
-Transpositions are chess positions, that can be reached via multiple paths in the opening tree. The predecessor-moves to a transposition are marked in red in the move list on the right-hand side.
+Transpositions are chess positions, that can be reached via multiple paths in the opening tree. The predecessor-moves to a transposition are marked in red in the move list on the right-hand side.   
+Right-click a red move and choose "Transpositions" (in both modes) to see every move order leading there, as PGN. Right-click a line to copy it (or all of them) to paste into other tools.
 
 ## How to Run OTB
 
@@ -68,6 +69,5 @@ Then set the location of the engine's executable via <kbd>File</kbd> &rarr; <kbd
 
 
 ## Features to wish for
-* When hitting a transposition, show the multiple paths how to get there
 * Add comments to moves
 * You name it. please let me know features that you would like to see implemented
