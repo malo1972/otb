@@ -402,17 +402,17 @@ class ToggleSwitch(QAbstractButton):
 
 
 class ModeSwitch(QAbstractButton):
-    """Wide Browse/Edit switch: grey track (inactive background); the
-    knob itself is the colored element, sliding between green (Browse,
-    the default) and red (Edit). Both labels are always visible, with
+    """Wide View/Build switch: grey track (inactive background); the
+    knob itself is the colored element, sliding between green (View,
+    the default) and red (Build). Both labels are always visible, with
     only font weight (bold vs light) distinguishing the selected side,
     per spec. Sized to fill whatever width its layout slot gives it (see
     MainWindow: it spans the same two grid columns as the start/back
     buttons), not a fixed pixel width."""
 
     TRACK_COLOR = QColor("#bbbbbb")       # grey: inactive background
-    KNOB_OFF_COLOR = QColor("#40a040")    # green: Browse
-    KNOB_ON_COLOR = QColor("#a04040")     # red: Edit
+    KNOB_OFF_COLOR = QColor("#40a040")    # green: View
+    KNOB_ON_COLOR = QColor("#a04040")     # red: Build
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -420,7 +420,7 @@ class ModeSwitch(QAbstractButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        self._knob_pos = 0.0  # 0.0 = left/Browse, 1.0 = right/Edit
+        self._knob_pos = 0.0  # 0.0 = left/View, 1.0 = right/Build
         self._hovered = False
         self._animation = QPropertyAnimation(self, b"knobPos", self)
         self._animation.setDuration(150)
@@ -494,21 +494,21 @@ class ModeSwitch(QAbstractButton):
         light_font.setBold(False)
         light_font.setWeight(QFont.Weight.Light)
 
-        browse_rect = QRectF(rect.left(), rect.top(), half_w, rect.height())
-        edit_rect = QRectF(rect.left() + half_w, rect.top(), half_w, rect.height())
-        browse_selected = self._knob_pos < 0.5
+        view_rect = QRectF(rect.left(), rect.top(), half_w, rect.height())
+        build_rect = QRectF(rect.left() + half_w, rect.top(), half_w, rect.height())
+        view_selected = self._knob_pos < 0.5
 
         painter.setPen(_icon_color())
-        painter.setFont(bold_font if browse_selected else light_font)
-        painter.drawText(browse_rect, Qt.AlignmentFlag.AlignCenter, "Browse")
-        painter.setFont(light_font if browse_selected else bold_font)
-        painter.drawText(edit_rect, Qt.AlignmentFlag.AlignCenter, "Edit")
+        painter.setFont(bold_font if view_selected else light_font)
+        painter.drawText(view_rect, Qt.AlignmentFlag.AlignCenter, "View")
+        painter.setFont(light_font if view_selected else bold_font)
+        painter.drawText(build_rect, Qt.AlignmentFlag.AlignCenter, "Build")
 
 
 # Mode board color schemes: {"square light": ..., "square dark": ...}
 BOARD_COLORS = {
-    "EDIT": {"square light": "#f2a4a4", "square dark": "#a04040"},    # light / dark red
-    "BROWSE": {"square light": "#a4f2a4", "square dark": "#40a040"},  # light / dark green
+    "BUILD": {"square light": "#f2a4a4", "square dark": "#a04040"},    # light / dark red
+    "VIEW": {"square light": "#a4f2a4", "square dark": "#40a040"},  # light / dark green
 }
 
 PROMO_TO_CODE = {None: 0, chess.KNIGHT: 1, chess.BISHOP: 2, chess.ROOK: 3, chess.QUEEN: 4}
@@ -643,6 +643,7 @@ def save_book(path: str, entries: list[BookEntry]) -> None:
 
 class EngineWorker(QObject):
     best_move_found = pyqtSignal(int, int)  # from_square, to_square
+    evaluation_updated = pyqtSignal(str)    # e.g. "+0.35", "-1.20", "+M3"
     error = pyqtSignal(str)
 
     def __init__(self, engine_path: str):
@@ -682,6 +683,18 @@ class EngineWorker(QObject):
     THREADS = 1                # keep CPU load light
     HASH_MB = 32                # keep memory footprint light
 
+    @staticmethod
+    def _format_score(score: chess.engine.PovScore) -> str:
+        """Evaluation from White's point of view, always with an explicit
+        sign: '+0.35' / '-1.20' in pawns, or '+M3' / '-M3' for forced mate."""
+        white = score.white()
+        if white.is_mate():
+            mate = white.mate()
+            if mate == 0:
+                return "M0"
+            return f"{'+' if mate > 0 else '-'}M{abs(mate)}"
+        return f"{white.score() / 100:+.2f}"
+
     def _run(self, board: chess.Board):
         try:
             if self._engine is None:
@@ -691,6 +704,9 @@ class EngineWorker(QObject):
             with self._engine.analysis(board, limit) as analysis:
                 self._analysis = analysis
                 for info in analysis:
+                    score = info.get("score")
+                    if score is not None:
+                        self.evaluation_updated.emit(self._format_score(score))
                     pv = info.get("pv")
                     if pv:
                         move = pv[0]
@@ -750,7 +766,7 @@ class BoardWidget(QWidget):
     def redraw(self):
         board = self.get_board()
         mode = self.get_mode()
-        colors = BOARD_COLORS.get(mode, BOARD_COLORS["BROWSE"])
+        colors = BOARD_COLORS.get(mode, BOARD_COLORS["VIEW"])
         display_board = board
         fill = {}
 
@@ -1082,7 +1098,7 @@ class MainWindow(QMainWindow):
         self.ply = 0
         self.board = chess.Board()
 
-        self.mode = "BROWSE"
+        self.mode = "VIEW"
 
         self.engine_worker: EngineWorker | None = None
         self.engine_active = False
@@ -1125,20 +1141,20 @@ class MainWindow(QMainWindow):
         self.engine_toggle.setToolTip("Engine")
 
         self.mode_switch = ModeSwitch()
-        self.mode_switch.setToolTip("Browse / Edit mode")
+        self.mode_switch.setToolTip("View / Build mode")
 
         nav_button_height = self.btn_start.sizeHint().height()
         self.mode_switch.setFixedHeight(nav_button_height)
         engine_size = int(nav_button_height * 0.8)  # scaled down to 80% of the button height
         self.engine_toggle.setFixedSize(int(engine_size * 1.9), engine_size)
         self.engine_label.setPixmap(_make_engine_icon(engine_size).pixmap(engine_size, engine_size))
-        # self.mode == "BROWSE" is the default; knob starts unchecked/left (green)
+        # self.mode == "VIEW" is the default; knob starts unchecked/left (green)
 
         self.btn_start.clicked.connect(self.goto_start)
         self.btn_back.clicked.connect(self.step_back)
         self.btn_flip.clicked.connect(self.board_widget.flip)
         self.engine_toggle.toggled.connect(self._on_engine_toggle_changed)
-        self.mode_switch.toggled.connect(lambda checked: self._set_mode("EDIT" if checked else "BROWSE"))
+        self.mode_switch.toggled.connect(lambda checked: self._set_mode("BUILD" if checked else "VIEW"))
 
         nav_grid = QGridLayout()
         nav_grid.setHorizontalSpacing(6)
@@ -1190,6 +1206,14 @@ class MainWindow(QMainWindow):
         # showMessage() puts text in the *temporary* slot, which Qt clears
         # whenever a menu opens/closes (the menu pushes its own status tip).
         # A permanent widget is untouched by that, so the status text stays.
+        self.eval_label = QLabel()
+        eval_font = self.eval_label.font()
+        eval_font.setBold(True)
+        self.eval_label.setFont(eval_font)
+        self.eval_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.eval_label.setMinimumWidth(self.eval_label.fontMetrics().horizontalAdvance("-99.99") + 12)
+        self.eval_label.setToolTip("Engine evaluation (from White's point of view)")
+        self.statusBar().addWidget(self.eval_label)  # leftmost, before the status text
         self.status_label = QLabel()
         self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.statusBar().addWidget(self.status_label, 1)
@@ -1202,7 +1226,7 @@ class MainWindow(QMainWindow):
         if mode == self.mode:
             return
         self.mode = mode
-        self.import_pgn_action.setEnabled(self.mode == "EDIT")
+        self.import_pgn_action.setEnabled(self.mode == "BUILD")
         self.board_widget.redraw()
         self._update_status()
 
@@ -1211,7 +1235,7 @@ class MainWindow(QMainWindow):
 
         self.import_pgn_action = QAction("Import PGN…", self)
         self.import_pgn_action.triggered.connect(self._import_pgn_dialog)
-        self.import_pgn_action.setEnabled(self.mode == "EDIT")  # Browse mode: read-only
+        self.import_pgn_action.setEnabled(self.mode == "BUILD")  # View mode: read-only
         file_menu.addAction(self.import_pgn_action)
 
         open_action = QAction("Open Book…", self)
@@ -1343,6 +1367,7 @@ class MainWindow(QMainWindow):
 
             self.engine_worker = EngineWorker(path)
             self.engine_worker.best_move_found.connect(self._on_engine_best_move)
+            self.engine_worker.evaluation_updated.connect(self._on_engine_evaluation)
             self.engine_worker.error.connect(self._on_engine_error)
 
         self.engine_active = True
@@ -1355,6 +1380,7 @@ class MainWindow(QMainWindow):
         if self.engine_worker is not None:
             try:
                 self.engine_worker.best_move_found.disconnect(self._on_engine_best_move)
+                self.engine_worker.evaluation_updated.disconnect(self._on_engine_evaluation)
             except (TypeError, RuntimeError):
                 pass
             self.engine_worker.stop()
@@ -1366,6 +1392,10 @@ class MainWindow(QMainWindow):
     def _on_engine_best_move(self, from_square: int, to_square: int):
         self.board_widget.set_engine_arrow((from_square, to_square))
 
+    def _on_engine_evaluation(self, text: str):
+        if self.engine_active:  # ignore late signals queued before the engine was stopped
+            self.eval_label.setText(text)
+
     def _on_engine_error(self, message: str):
         self._stop_engine()
         QMessageBox.warning(self, "Engine error", message)
@@ -1376,7 +1406,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def play_move(self, move: chess.Move):
-        if self.mode == "EDIT":
+        if self.mode == "BUILD":
             self._record_book_move(self.board, move)
         if self.ply < len(self.game_moves) and move == self.game_moves[self.ply]:
             self.ply += 1
@@ -1518,8 +1548,8 @@ class MainWindow(QMainWindow):
         return collected
 
     def _on_context_menu(self, pos):
-        if self.mode != "EDIT":
-            return  # Browse mode: read-only, no delete available
+        if self.mode != "BUILD":
+            return  # View mode: read-only, no delete available
         item = self.move_list.itemAt(pos)
         if item is None:
             return
@@ -1566,6 +1596,7 @@ class MainWindow(QMainWindow):
     def refresh(self):
         self.board_widget.set_hover_arrow(None)
         self.board_widget.set_engine_arrow(None)
+        self.eval_label.setText("")  # stale until the engine reports for the new position
         self._populate_move_list()
         self._update_status()
         self.board_widget.redraw()

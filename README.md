@@ -11,14 +11,14 @@ OTB lets you build and save your opening repertoire to a single polyglot file.
 The polyglot format has many advantages over PGN: interchangeability with other tools like SCID, easy detection of transpositions, weigthing of branches and many more:  
 https://chessprogramming.org/PolyGlot
 
-OTB offers a $\color{#00FF00}{\text{browse-mode (green)}}$, where moves that you enter in the chessboard are **NOT** saved.   
-In $\color{#FF0000}{\text{edit-mode (red)}}$ every move you enter is immediately saved to the polyglot file without additional user interaction.   
+OTB offers a $\color{#00FF00}{\text{view-mode (green)}}$, where moves that you enter in the chessboard are **NOT** saved.   
+In $\color{#FF0000}{\text{build-mode (red)}}$ every move you enter is immediately saved to the polyglot file without additional user interaction.   
 The default-filename name is book.bin, but you can create your own files.   
 The currently used book and further status information is displayed in the bottom statusbar.
 
 You can also expand your opening tree by importing PGN-files via <kbd>File</kbd> &rarr;   <kbd>Import PGN...</kbd> (e.g. PGN's that you exported from other tools).
 
-Deletion is done via right-click on a move in edit-mode.   
+Deletion is done via right-click on a move in build-mode.   
 CAUTION: all attached branches to follow behind that node will also be also deleted.
 
 Transpositions are chess positions, that can be reached via multiple paths in the opening tree. The predecessor-moves to a transposition are marked in red in the move list on the right-hand side.
@@ -28,7 +28,7 @@ Transpositions are chess positions, that can be reached via multiple paths in th
 For quick evaluation and distribution the python package is managed by `uv`:   
 https://docs.astral.sh/uv/
 
-Installers will follow soon be added for every OS...
+Installers will soon be added for every OS...
 
 ### Download the project from github into a project-folder of your choice
 * `otb.py` : the single-file python code 
