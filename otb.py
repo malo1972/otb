@@ -93,6 +93,9 @@ DRAG_THRESHOLD = 6  # px of mouse movement before a press counts as a drag
 HOVER_ARROW_COLOR = "#ffcc00"         # yellow
 ENGINE_ARROW_COLOR = "#0066ff"        # blue, continuously-updating engine best move
 DRAG_SOURCE_COLOR = "#ffff0088"       # semi-transparent yellow for start square
+APP_VERSION = "0.1"
+USER_GUIDE_URL = "https://github.com/malo1972/otb#readme"
+
 HOVER_ROW_COLOR = QColor(0x88, 0x88, 0x88, 90)  # same mid-grey as button hover
                                         # (#888888); translucent because the delegate
                                         # paints this over the already-drawn move text,
@@ -1081,19 +1084,35 @@ class TranspositionsDialog(QDialog):
 
     def __init__(self, lines: list[str], truncated: bool, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Transpositions")
+        # No window title: the window manager decides its alignment (GNOME
+        # centers it), so a left-aligned heading is shown inside instead.
+        self.setWindowTitle(" ")  # " " not "": Qt replaces an empty title with the app name (otb.py)
         self.resize(560, 300)
 
         self.list_widget = QListWidget()
         self.list_widget.addItems(lines)
+        list_font = self.list_widget.font()
+        list_font.setPointSizeF(list_font.pointSizeF() * 1.25)
+        list_font.setBold(True)
+        self.list_widget.setFont(list_font)
+        c = HOVER_ROW_COLOR  # same grey as the main move list's hover
+        self.list_widget.setStyleSheet(
+            f"QListWidget::item:hover {{ background: rgba({c.red()}, {c.green()}, {c.blue()}, {c.alpha()}); }}"
+        )
         self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._on_context_menu)
 
         layout = QVBoxLayout(self)
-        caption = f"{len(lines)} move order(s) lead to this position"
+        heading = QLabel("Transpositions")
+        heading_font = heading.font()
+        heading_font.setBold(True)
+        heading_font.setPointSizeF(heading_font.pointSizeF() * 1.4)
+        heading.setFont(heading_font)
+        layout.addWidget(heading)
+        caption = f"{len(lines)} move orders lead to the subsequent position"
         if truncated:
             caption += f" (only the first {len(lines)} shown)"
-        layout.addWidget(QLabel(caption + ". Right-click a line to copy it."))
+        layout.addWidget(QLabel(caption + ".\nRight-click a line to copy the PGN."))
         layout.addWidget(self.list_widget)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
@@ -1136,7 +1155,7 @@ class MainWindow(QMainWindow):
         self.book_entries: list[BookEntry] = load_book(self.book_path)
         self._backfill_resulting_keys()
         self._transposition_cache: set[int] | None = None
-        self._update_window_title()
+        self.setWindowTitle("Opening Tree Builder")
 
         self.game_moves: list[chess.Move] = []
         self.ply = 0
@@ -1290,6 +1309,56 @@ class MainWindow(QMainWindow):
         select_engine_action.triggered.connect(self._select_engine_dialog)
         file_menu.addAction(select_engine_action)
 
+        help_menu = self.menuBar().addMenu("Help")
+        getting_started_action = QAction("Getting Started", self)
+        getting_started_action.triggered.connect(self._show_getting_started)
+        help_menu.addAction(getting_started_action)
+        help_menu.addSeparator()
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
+    def _show_getting_started(self):
+        box = QMessageBox(self)
+        box.setWindowTitle(" ")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        box.setText(
+            "<h3>Getting Started</h3>"
+            "<p><b style='color:#40a040'>View mode (green)</b>: explore your book, "
+            "moves are <b>not</b> saved.</p>"
+            "<p><b style='color:#a04040'>Build mode (red)</b>: every move you play is "
+            "saved to the book immediately.</p>"
+            "<p>Play moves on the board, or click a move in the list.</p>"
+            "<p>Right-click a move (build mode) to edit its weight or delete it "
+            "together with all following moves.</p>"
+            "<p><b>Move List:</b> <span style='color:#c00000'>Red</span> moves lead to a transposition. "
+            "Right-click and select <i>Transpositions</i> to see every move order as PGN.</p>"
+            "<p>Turn on the engine switch for a blue best-move arrow and the "
+            "evaluation in the status bar.</p>"
+            "<p><i>File > Import PGN…</i> adds whole games (build mode).</p>"
+            f'<p>See verbose documentation: <a href="{USER_GUIDE_URL}"><b>README (GitHub)</b></a></p>'
+        )
+        box.exec()
+
+    def _show_about(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("About")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        box.setText(
+            f"<h3>Opening Tree Builder</h3>"
+            f"<p>Version {APP_VERSION}</p>"
+            "<p>Free and open-source software, licensed under the "
+            '<a href="https://www.gnu.org/licenses/gpl-3.0.html">GNU&nbsp;GPL&nbsp;v3</a>.<br>'
+            "You may use, share and modify it free of charge.</p>"
+            "<hr>"
+            "<p>For open-source chess broadcasting hard- and software, tournaments and more visit:</p>"
+            '<p style="font-size: x-large;">'
+            '<a href="https://www.gambitgear.ch">www.gambitgear.ch</a></p>'
+        )
+        box.exec()
+
     def _select_engine_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select UCI engine executable", "", "All files (*)"
@@ -1302,9 +1371,6 @@ class MainWindow(QMainWindow):
                 self.engine_worker = None
                 self._start_engine()
 
-    def _update_window_title(self):
-        self.setWindowTitle(f"Opening Tree Builder — {os.path.basename(self.book_path)}")
-
     def _open_book_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open Polyglot book", "", "Polyglot books (*.bin);;All files (*)"
@@ -1315,7 +1381,6 @@ class MainWindow(QMainWindow):
             self._backfill_resulting_keys()
             self._transposition_cache = None
             QSettings("ChessRepertoire", "ChessRepertoireApp").setValue("book_path", path)
-            self._update_window_title()
             self.refresh()
 
     def _import_pgn_dialog(self):
@@ -1672,7 +1737,7 @@ class MainWindow(QMainWindow):
     def _edit_weight(self, entry: BookEntry):
         # polyglot stores the weight as an unsigned 16-bit value
         weight, ok = QInputDialog.getInt(
-            self, "Edit weight", "Weight:", entry.weight, 1, 0xFFFF
+            self, " ", "Weight:", entry.weight, 1, 0xFFFF
         )
         if not ok or weight == entry.weight:
             return

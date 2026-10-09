@@ -19,3 +19,8 @@ chess-app = "otb:main"
 # Tells hatchling where to find your single-file script
 [tool.hatch.build.targets.wheel]
 include = ["otb.py"]
+
+# Run otb.py as a plain script: uv only installs the dependencies and
+# doesn't build/install this project, so README.md etc. aren't required
+[tool.uv]
+package = false

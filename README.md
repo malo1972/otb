@@ -19,7 +19,7 @@ The currently used book and further status information is displayed in the botto
 You can also expand your opening tree by importing PGN-files via <kbd>File</kbd> &rarr;   <kbd>Import PGN...</kbd> (e.g. PGN's that you exported from other tools).
 
 Deletion is done via right-click on a move in build-mode.   
-CAUTION: all attached branches to follow behind that node will also be also deleted.   
+CAUTION: all attached branches to follow behind that node will also be deleted.   
 Right-click also lets you edit a move's weight (how often it is chosen by engines/GUIs using the book).   
 
 Transpositions are chess positions, that can be reached via multiple paths in the opening tree. The predecessor-moves to a transposition are marked in red in the move list on the right-hand side.   
@@ -33,6 +33,7 @@ https://docs.astral.sh/uv/
 Installers will soon be added for every OS...
 
 ### Download the project from github into a project-folder of your choice
+**[⬇ Download OTB (zip)](https://github.com/malo1972/otb/archive/refs/heads/main.zip)** — unzip it into a folder of your choice. It contains:
 * `otb.py` : the single-file python code 
 * `pyproject.toml` : description of dependencies. Used by `uv` to create a virtual environment
 * `uv.lock` : the currently used dependencies for reproducible builds
@@ -63,7 +64,7 @@ uv run otb.py
 ### Use an Engine
 
 If you want to use engine-evaluation, toggle the engine-switch.     
-A blue arrow will indicate the engine's top choice.   
+A blue arrow will indicate the engine's top choice, the current engine-evaluation is shown leftmost in the statusbar. 
 Download your preferred engine (e.g. from https://stockfishchess.org/).    
 Then set the location of the engine's executable via <kbd>File</kbd> &rarr; <kbd>Select Engine...</kbd> (will be saved to settings).
 
