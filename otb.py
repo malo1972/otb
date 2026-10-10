@@ -1153,9 +1153,8 @@ class MainWindow(QMainWindow):
                 self.book_path = stored_path
             else:
                 self.book_path = "book.bin"
-        self.book_entries: list[BookEntry] = load_book(self.book_path)
-        self._backfill_resulting_keys()
         self._transposition_cache: set[int] | None = None
+        self._load_book(self.book_path)
         self.setWindowTitle("Opening Tree Builder")
 
         self.game_moves: list[chess.Move] = []
@@ -1378,9 +1377,7 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.book_path = path
-            self.book_entries = load_book(path)
-            self._backfill_resulting_keys()
-            self._transposition_cache = None
+            self._load_book(path)
             QSettings("ChessRepertoire", "ChessRepertoireApp").setValue("book_path", path)
             self.refresh()
 
@@ -1391,13 +1388,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        # Window-modal: keeps the UI responsive (no "not responding") while
-        # blocking clicks on the board/move list that would change the book
-        # mid-import.
-        progress = QProgressDialog("Importing PGN…", "Cancel", 0, 1000, self)
-        progress.setWindowTitle(" ")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(300)
+        progress = self._make_progress("Importing PGN…", cancellable=True)
 
         def report(fraction: float, game_count: int) -> bool:
             progress.setValue(int(fraction * 1000))
@@ -1409,12 +1400,12 @@ class MainWindow(QMainWindow):
             result = self._import_pgn_file(path, report)
         except Exception as exc:  # noqa: BLE001
             progress.close()
-            self._reload_book()  # drop the partial in-memory import
+            self._load_book(self.book_path)  # drop the partial in-memory import
             QMessageBox.warning(self, "Import failed", str(exc))
             return
         if result is None:  # cancelled: nothing was saved, restore the book
             progress.close()
-            self._reload_book()
+            self._load_book(self.book_path)
             return
         game_count, move_count = result
         progress.setLabelText("Updating view…")
@@ -1448,10 +1439,28 @@ class MainWindow(QMainWindow):
         save_book(self.book_path, self.book_entries)
         return game_count, move_count
 
-    def _reload_book(self):
-        self.book_entries = load_book(self.book_path)
-        self._backfill_resulting_keys()
+    def _make_progress(self, label: str, cancellable: bool) -> QProgressDialog:
+        """Window-modal progress dialog: keeps the UI responsive (no "not
+        responding") while blocking clicks that would change the book."""
+        progress = QProgressDialog(label, "Cancel" if cancellable else None, 0, 1000, self)
+        if not cancellable:
+            progress.setCancelButton(None)
+        progress.setWindowTitle(" ")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)
+        return progress
+
+    def _load_book(self, path: str):
+        progress = self._make_progress(f"Opening {os.path.basename(path)}…", cancellable=False)
+
+        def report(fraction: float):
+            progress.setValue(int(fraction * 1000))
+            QApplication.processEvents()
+
+        self.book_entries = load_book(path)
+        self._backfill_resulting_keys(report)
         self._transposition_cache = None
+        progress.close()
 
     def _import_game_tree(
         self, node: chess.pgn.GameNode, board: chess.Board, index: dict[tuple[int, int, int, int], BookEntry]
@@ -1624,24 +1633,33 @@ class MainWindow(QMainWindow):
             index.setdefault(e.key, []).append(e)
         return index
 
-    def _backfill_resulting_keys(self):
+    def _backfill_resulting_keys(self, report=None):
         """Entries created this session (played moves, PGN import) already
         have resulting_key cached at creation time. Entries just loaded
         from a .bin file don't -- the Polyglot format has no such field --
         so walk the book once from the starting position to fill them in.
-        Call this once per load, not on every refresh."""
+        Call this once per load, not on every refresh.
+
+        report(fraction_done) is called periodically for progress display.
+        Zobrist hashing dominates the cost, so each position's key travels
+        with its board through the queue instead of being hashed twice."""
         if all(e.resulting_key is not None for e in self.book_entries):
             return  # nothing to backfill
 
         entries_by_key = self._index_entries_by_key()
-        visited: set[int] = set()
-        queue: deque[chess.Board] = deque([chess.Board()])
-        visited.add(chess.polyglot.zobrist_hash(queue[0]))
+        total = len(self.book_entries) or 1
+        processed = 0
+        start = chess.Board()
+        start_key = chess.polyglot.zobrist_hash(start)
+        visited: set[int] = {start_key}
+        queue: deque[tuple[chess.Board, int]] = deque([(start, start_key)])
 
         while queue:
-            board = queue.popleft()
-            key = chess.polyglot.zobrist_hash(board)
+            board, key = queue.popleft()
             for e in entries_by_key.get(key, []):
+                processed += 1
+                if report is not None and processed % 2000 == 0:
+                    report(min(processed / total, 1.0))
                 move = decode_move(board, e)
                 if move is None:
                     continue
@@ -1651,7 +1669,7 @@ class MainWindow(QMainWindow):
                     e.resulting_key = child_key
                 if child_key not in visited:
                     visited.add(child_key)
-                    queue.append(board.copy(stack=False))  # history not needed, copying it is slow
+                    queue.append((board.copy(stack=False), child_key))  # history not needed, copying it is slow
                 board.pop()
 
     def _transposition_resulting_keys(self) -> set[int]:
