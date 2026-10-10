@@ -4,3 +4,7 @@ venv/
 
 # Exclude all binary files
 *.bin
+
+# Exclude Python bytecode caches
+__pycache__/
+*.pyc

@@ -78,6 +78,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSizePolicy,
     QStatusBar,
@@ -1389,12 +1390,37 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+
+        # Window-modal: keeps the UI responsive (no "not responding") while
+        # blocking clicks on the board/move list that would change the book
+        # mid-import.
+        progress = QProgressDialog("Importing PGN…", "Cancel", 0, 1000, self)
+        progress.setWindowTitle(" ")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)
+
+        def report(fraction: float, game_count: int) -> bool:
+            progress.setValue(int(fraction * 1000))
+            progress.setLabelText(f"Importing PGN… {game_count} games")
+            QApplication.processEvents()
+            return not progress.wasCanceled()
+
         try:
-            game_count, move_count = self._import_pgn_file(path)
+            result = self._import_pgn_file(path, report)
         except Exception as exc:  # noqa: BLE001
+            progress.close()
+            self._reload_book()  # drop the partial in-memory import
             QMessageBox.warning(self, "Import failed", str(exc))
             return
+        if result is None:  # cancelled: nothing was saved, restore the book
+            progress.close()
+            self._reload_book()
+            return
+        game_count, move_count = result
+        progress.setLabelText("Updating view…")
+        QApplication.processEvents()
         self.refresh()
+        progress.close()
         QMessageBox.information(
             self,
             "Import complete",
@@ -1402,27 +1428,41 @@ class MainWindow(QMainWindow):
             f"adding/updating {move_count} move(s) in the book.",
         )
 
-    def _import_pgn_file(self, path: str) -> tuple[int, int]:
+    def _import_pgn_file(self, path: str, report=None) -> tuple[int, int] | None:
+        """report(fraction_done, game_count) -> keep_going is called every
+        few games; returns None (book left unsaved) if it asks to stop."""
         game_count = 0
         move_count = 0
+        total_size = os.path.getsize(path) or 1
+        index = {(e.key, e.from_square, e.to_square, e.promotion): e for e in self.book_entries}
         with open(path, encoding="utf-8", errors="replace") as f:
             while True:
                 game = chess.pgn.read_game(f)
                 if game is None:
                     break
                 game_count += 1
-                move_count += self._import_game_tree(game, game.board())
+                move_count += self._import_game_tree(game, game.board(), index)
+                if report is not None and game_count % 20 == 0:
+                    if not report(min(f.tell() / total_size, 1.0), game_count):
+                        return None
         save_book(self.book_path, self.book_entries)
         return game_count, move_count
 
-    def _import_game_tree(self, node: chess.pgn.GameNode, board: chess.Board) -> int:
+    def _reload_book(self):
+        self.book_entries = load_book(self.book_path)
+        self._backfill_resulting_keys()
+        self._transposition_cache = None
+
+    def _import_game_tree(
+        self, node: chess.pgn.GameNode, board: chess.Board, index: dict[tuple[int, int, int, int], BookEntry]
+    ) -> int:
         count = 0
         for child in node.variations:
             move = child.move
-            self._record_book_move(board, move, save=False)
+            self._record_book_move(board, move, save=False, index=index)
             count += 1
             board.push(move)
-            count += self._import_game_tree(child, board)
+            count += self._import_game_tree(child, board, index)
             board.pop()
         return count
 
@@ -1525,18 +1565,37 @@ class MainWindow(QMainWindow):
         self._rebuild_board()
         self.refresh()
 
-    def _record_book_move(self, board_before: chess.Board, move: chess.Move, save: bool = True):
+    def _record_book_move(
+        self,
+        board_before: chess.Board,
+        move: chess.Move,
+        save: bool = True,
+        index: dict[tuple[int, int, int, int], BookEntry] | None = None,
+    ):
+        """index: optional (key, from, to, promo) -> entry lookup for bulk
+        imports; without it every call scans the whole book, which makes
+        importing a big PGN quadratic."""
         key = chess.polyglot.zobrist_hash(board_before)
         from_sq, to_sq, promo = encode_move(board_before, move)
-        for e in self.book_entries:
-            if e.key == key and e.from_square == from_sq and e.to_square == to_sq and e.promotion == promo:
-                e.weight += 1
-                break
+        if index is not None:
+            existing = index.get((key, from_sq, to_sq, promo))
         else:
-            board_after = board_before.copy()
-            board_after.push(move)
-            resulting_key = chess.polyglot.zobrist_hash(board_after)
-            self.book_entries.append(BookEntry(key, from_sq, to_sq, promo, 1, 0, resulting_key))
+            existing = next(
+                (e for e in self.book_entries
+                 if e.key == key and e.from_square == from_sq and e.to_square == to_sq and e.promotion == promo),
+                None,
+            )
+        if existing is not None:
+            existing.weight = min(existing.weight + 1, 0xFFFF)  # polyglot weight is 16-bit
+        else:
+            # push/pop instead of copy(): copy() duplicates the whole move stack
+            board_before.push(move)
+            resulting_key = chess.polyglot.zobrist_hash(board_before)
+            board_before.pop()
+            entry = BookEntry(key, from_sq, to_sq, promo, 1, 0, resulting_key)
+            self.book_entries.append(entry)
+            if index is not None:
+                index[(key, from_sq, to_sq, promo)] = entry
             self._transposition_cache = None  # graph structure changed
         if save:
             save_book(self.book_path, self.book_entries)
@@ -1592,7 +1651,7 @@ class MainWindow(QMainWindow):
                     e.resulting_key = child_key
                 if child_key not in visited:
                     visited.add(child_key)
-                    queue.append(board.copy())
+                    queue.append(board.copy(stack=False))  # history not needed, copying it is slow
                 board.pop()
 
     def _transposition_resulting_keys(self) -> set[int]:
@@ -1607,30 +1666,28 @@ class MainWindow(QMainWindow):
         marking every move for the rest of the shared line; in-degree
         instead only flags the specific node where the convergence
         actually happens, which is what should be marked red -- not its
-        downstream continuation."""
+        downstream continuation.
+
+        Walks the cached resulting_key edges instead of replaying moves on
+        a board -- no move generation or hashing, so it stays fast for
+        books with hundreds of thousands of entries."""
         entries_by_key = self._index_entries_by_key()
 
         in_degree: dict[int, int] = {}
-        expanded: set[int] = set()
-
-        start = chess.Board()
-        expanded.add(chess.polyglot.zobrist_hash(start))
-        queue: deque[chess.Board] = deque([start])
+        start_key = chess.polyglot.zobrist_hash(chess.Board())
+        expanded: set[int] = {start_key}
+        queue: deque[int] = deque([start_key])
 
         while queue:
-            board = queue.popleft()
-            key = chess.polyglot.zobrist_hash(board)
+            key = queue.popleft()
             for e in entries_by_key.get(key, []):
-                move = decode_move(board, e)
-                if move is None:
-                    continue
-                board.push(move)
-                child_key = chess.polyglot.zobrist_hash(board)
+                child_key = e.resulting_key
+                if child_key is None:
+                    continue  # not reachable from the start position
                 in_degree[child_key] = in_degree.get(child_key, 0) + 1
                 if child_key not in expanded:
                     expanded.add(child_key)
-                    queue.append(board.copy())
-                board.pop()
+                    queue.append(child_key)
 
         return {key for key, count in in_degree.items() if count > 1}
 

@@ -32,7 +32,7 @@ https://docs.astral.sh/uv/
 
 Installers will soon be added for every OS...
 
-### Download the project from github into a project-folder of your choice
+### Download
 **[⬇ Download OTB (zip)](https://github.com/malo1972/otb/archive/refs/heads/main.zip)** — unzip it into a folder of your choice. It contains:
 * `otb.py` : the single-file python code 
 * `pyproject.toml` : description of dependencies. Used by `uv` to create a virtual environment
