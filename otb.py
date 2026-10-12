@@ -35,6 +35,7 @@ import chess.svg
 
 from PyQt6.QtCore import (
     QEasingCurve,
+    QEvent,
     QObject,
     QPoint,
     QPointF,
@@ -680,7 +681,7 @@ def save_book(path: str, entries: list[BookEntry]) -> None:
 
 class EngineWorker(QObject):
     best_move_found = pyqtSignal(int, int)  # from_square, to_square
-    evaluation_updated = pyqtSignal(str)    # e.g. "+0.35", "-1.20", "+M3"
+    evaluation_updated = pyqtSignal(str)    # e.g. "+0.35 (18)", "-1.20 (22)", "+M3 (30)" -- (search depth)
     error = pyqtSignal(str)
 
     def __init__(self, engine_path: str):
@@ -743,7 +744,11 @@ class EngineWorker(QObject):
                 for info in analysis:
                     score = info.get("score")
                     if score is not None:
-                        self.evaluation_updated.emit(self._format_score(score))
+                        text = self._format_score(score)
+                        depth = info.get("depth")
+                        if depth is not None:
+                            text += f" ({depth})"
+                        self.evaluation_updated.emit(text)
                     pv = info.get("pv")
                     if pv:
                         move = pv[0]
@@ -1068,6 +1073,11 @@ class MoveItemDelegate(QStyledItemDelegate):
         super().__init__(list_widget)
         self.list_widget = list_widget
 
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        size.setHeight(_move_row_height(self.list_widget.fontMetrics()))
+        return size
+
     def paint(self, painter, option, index):
         item = self.list_widget.item(index.row())
         opt = QStyleOptionViewItem(option)
@@ -1175,6 +1185,13 @@ class ManualSizeGrip(QWidget):
             event.accept()
 
 
+def _move_row_height(metrics) -> int:
+    """Row height shared by the score sheet and the book list: the font's
+    full height (ascent + descent, so the tail of g/p/y fits) plus about a
+    third of it as breathing room."""
+    return round(metrics.height() * 1.35)
+
+
 def _move_list_font(base: QFont) -> QFont:
     """The font shared by all move lists: twice the default size."""
     font = QFont(base)
@@ -1183,6 +1200,18 @@ def _move_list_font(base: QFont) -> QFont:
     else:
         font.setPixelSize(font.pixelSize() * 2)
     return font
+
+
+class SeparatorLineDelegate(QStyledItemDelegate):
+    """Default item painting plus the shared thin separator line below each
+    row (as in the move lists)."""
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        painter.save()
+        painter.setPen(_separator_color(option.widget, option))
+        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+        painter.restore()
 
 
 class TranspositionsDialog(QDialog):
@@ -1197,20 +1226,24 @@ class TranspositionsDialog(QDialog):
         self.setWindowTitle(" ")  # " " not "": Qt replaces an empty title with the app name (otb.py)
 
         self.list_widget = QListWidget()
+        self.list_widget.setFont(_move_list_font(self.list_widget.font()))  # same as the move lists
+        metrics = self.list_widget.fontMetrics()
         for pgn, moves in lines:
             item = QListWidgetItem(pgn)
             item.setData(Qt.ItemDataRole.UserRole, moves)
+            # same row height as the move lists (room for the tail of g/p/y)
+            item.setSizeHint(QSize(metrics.horizontalAdvance(pgn) + 12, _move_row_height(metrics)))
             self.list_widget.addItem(item)
         self.list_widget.itemClicked.connect(
             lambda item: on_select(item.data(Qt.ItemDataRole.UserRole))
         )
-        self.list_widget.setFont(_move_list_font(self.list_widget.font()))  # same as the move lists
         c = HOVER_ROW_COLOR  # same grey as the main move list's hover
         self.list_widget.setStyleSheet(
             f"QListWidget::item:hover {{ background: rgba({c.red()}, {c.green()}, {c.blue()}, {c.alpha()}); }}"
         )
         self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._on_context_menu)
+        self.list_widget.setItemDelegate(SeparatorLineDelegate(self.list_widget))
 
         layout = QVBoxLayout(self)
         heading = QLabel("Transpositions")
@@ -1223,7 +1256,7 @@ class TranspositionsDialog(QDialog):
         if truncated:
             caption += f" (only the first {len(lines)} shown)"
         layout.addWidget(QLabel(caption + ".\nLeft-click a line to load it, right-click to copy the PGN."))
-        layout.addWidget(self.list_widget)
+        layout.addWidget(SeparatorFrame(self.list_widget))  # same outer frame as the move lists
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -1312,6 +1345,8 @@ class LineMoveDelegate(QStyledItemDelegate):
         opt.text = ""  # let the style draw background/selection only
         style = opt.widget.style() if opt.widget else QApplication.style()
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        if getattr(opt.widget, "hovered_cell", None) == (index.row(), index.column()):
+            painter.fillRect(option.rect, HOVER_ROW_COLOR)  # same grey as the book list's hover
 
         _draw_item_text(painter, opt, index, self.indent(opt.rect.width(), opt.fontMetrics), text)
         painter.save()
@@ -1325,6 +1360,24 @@ class LineMoveDelegate(QStyledItemDelegate):
         return max(4, (cell_width - metrics.horizontalAdvance(cls.REFERENCE_SAN)) // 2)
 
 
+class MoveNumberHeader(QHeaderView):
+    """Row-number header of the score sheet: draws the same separator line
+    under each move number as LineMoveDelegate draws under the moves."""
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Vertical, parent)
+
+    def paintSection(self, painter, rect, logical_index):
+        super().paintSection(painter, rect, logical_index)
+        painter.save()
+        painter.setPen(_separator_color(self))
+        painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+        # Divider to White's moves, drawn over the style's own section border
+        # (a second line in the first cell would sit next to it and look 2 px)
+        painter.drawLine(rect.topRight(), rect.bottomRight())
+        painter.restore()
+
+
 class LineTable(QTableWidget):
     """The current line as a two-column score sheet (White | Black, move
     numbers as row headers). The move leading to the current position is
@@ -1336,6 +1389,7 @@ class LineTable(QTableWidget):
 
     def __init__(self):
         super().__init__(0, 2)
+        self.setVerticalHeader(MoveNumberHeader(self))
         self.horizontalHeader().hide()
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1347,6 +1401,8 @@ class LineTable(QTableWidget):
         self.setWordWrap(False)
         self.setItemDelegate(LineMoveDelegate(self))
         self.cellClicked.connect(self._on_cell_clicked)
+        self.hovered_cell: tuple[int, int] | None = None  # painted by LineMoveDelegate
+        self.setMouseTracking(True)
         # Grid drawn by LineMoveDelegate instead, in _separator_color() --
         # QTableView's own grid color can only be changed via a stylesheet,
         # which also restyles (and shrinks) the row-number header.
@@ -1354,6 +1410,7 @@ class LineTable(QTableWidget):
 
     def set_line(self, sans: list[str], current_ply: int):
         self.blockSignals(True)
+        self.hovered_cell = None  # rows are rebuilt; the next mouse move re-detects it
         self.clearSelection()
         self.setRowCount((len(sans) + 1) // 2)
         self.clearContents()
@@ -1370,6 +1427,28 @@ class LineTable(QTableWidget):
         else:
             self.scrollToTop()
         self.blockSignals(False)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            self.verticalHeader().setMinimumSectionSize(1)
+            self.verticalHeader().setDefaultSectionSize(_move_row_height(self.fontMetrics()))
+
+    def _set_hovered_cell(self, cell: tuple[int, int] | None):
+        if cell != self.hovered_cell:
+            self.hovered_cell = cell
+            self.viewport().update()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        index = self.indexAt(event.position().toPoint())
+        on_move = index.isValid() and self.item(index.row(), index.column()) is not None
+        self._set_hovered_cell((index.row(), index.column()) if on_move else None)
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.Type.Leave:
+            self._set_hovered_cell(None)
+        return super().viewportEvent(event)
 
     def _on_cell_clicked(self, row: int, col: int):
         if self.item(row, col) is not None:  # empty Black cell after White's last move
@@ -1572,12 +1651,18 @@ class MainWindow(QMainWindow):
         eval_font.setBold(True)
         self.eval_label.setFont(eval_font)
         self.eval_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.eval_label.setMinimumWidth(self.eval_label.fontMetrics().horizontalAdvance("-99.99") + 12)
-        self.eval_label.setToolTip("Engine evaluation (from White's point of view)")
+        self.eval_label.setMinimumWidth(self.eval_label.fontMetrics().horizontalAdvance("-99.99 (99)") + 12)
+        self.eval_label.setToolTip("Engine evaluation from White's point of view (search depth)")
         self.statusBar().addWidget(self.eval_label)  # leftmost, before the status text
+        # eval | check/mate message ............ book path | size grip
         self.status_label = QLabel()
         self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.statusBar().addWidget(self.status_label, 1)
+        # Ignored size policy: a long path is cut off instead of widening the window
+        self.book_label = QLabel()
+        self.book_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.book_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.statusBar().addWidget(self.book_label, 2)
         size_grip = ManualSizeGrip(self)
         self.statusBar().addPermanentWidget(size_grip)
 
@@ -1608,7 +1693,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(select_engine_action)
 
         search_menu = self.menuBar().addMenu("Search")
-        search_fen_action = QAction("Search for Position by FEN…", self)
+        search_fen_action = QAction("by FEN…", self)
         search_fen_action.triggered.connect(lambda: FenSearchDialog(self._search_fen, self).exec())
         search_menu.addAction(search_fen_action)
 
@@ -2313,9 +2398,10 @@ class MainWindow(QMainWindow):
         elif board.is_stalemate():
             msg = "Stalemate"
         else:
-            check = "Check — " if board.is_check() else ""
-            msg = f"{check}book: {self.book_path}"
+            msg = "Check" if board.is_check() else ""
         self.status_label.setText(msg)
+        self.book_label.setText(f"book: {self.book_path}")
+        self.book_label.setToolTip(self.book_path)
 
 
 def main():
