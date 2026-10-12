@@ -54,23 +54,30 @@ from PyQt6.QtGui import (
     QCursor,
     QFont,
     QIcon,
+    QKeySequence,
     QPainter,
     QPainterPath,
     QPalette,
     QPen,
     QPixmap,
     QPolygonF,
+    QShortcut,
+    QTransform,
 )
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtSvgWidgets import QSvgWidget
 from PyQt6.QtWidgets import (
     QAbstractButton,
+    QAbstractScrollArea,
+    QAbstractItemView,
     QApplication,
+    QFrame,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -83,13 +90,19 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStatusBar,
+    QStyle,
     QStyledItemDelegate,
+    QStyleOption,
+    QStyleOptionViewItem,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 MIN_BOARD_SIZE = 320   # smallest the board will shrink to
 RIGHT_PANEL_WIDTH = 280  # constant width for the nav+list panel
+LINE_PANEL_WIDTH = RIGHT_PANEL_WIDTH  # current-line score sheet + nav buttons, same width as the right panel
 DRAG_THRESHOLD = 6  # px of mouse movement before a press counts as a drag
 
 HOVER_ARROW_COLOR = "#ffcc00"         # yellow
@@ -226,6 +239,22 @@ def _draw_skip_start_pixmap(size: int, color: QColor) -> QPixmap:
 
 def _make_skip_start_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
     return _build_dual_icon(_draw_skip_start_pixmap, size, color)
+
+
+def _mirrored(draw_fn):
+    """Horizontally mirrored variant of a nav pixmap draw function, so the
+    forward icons are exact mirror images of the back ones."""
+    def draw(size: int, color: QColor) -> QPixmap:
+        return draw_fn(size, color).transformed(QTransform().scale(-1, 1))
+    return draw
+
+
+def _make_step_forward_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+    return _build_dual_icon(_mirrored(_draw_step_back_pixmap), size, color)
+
+
+def _make_skip_end_icon(size: int = NAV_ICON_SIZE, color: QColor | None = None) -> QIcon:
+    return _build_dual_icon(_mirrored(_draw_skip_start_pixmap), size, color)
 
 
 ENGINE_ICON_PNG_B64 = (
@@ -795,11 +824,13 @@ class BoardWidget(QWidget):
             display_board = board.copy()
             display_board.remove_piece_at(self.selected)
 
+        # SVG paints in list order, so the hover arrow goes last to stay on
+        # top; if it shows the engine's move, the blue arrow is left out.
         arrows = []
+        if self.engine_arrow is not None and self.engine_arrow != self.hover_arrow:
+            arrows.append(chess.svg.Arrow(self.engine_arrow[0], self.engine_arrow[1], color=ENGINE_ARROW_COLOR))
         if self.hover_arrow is not None:
             arrows.append(chess.svg.Arrow(self.hover_arrow[0], self.hover_arrow[1], color=HOVER_ARROW_COLOR))
-        if self.engine_arrow is not None:
-            arrows.append(chess.svg.Arrow(self.engine_arrow[0], self.engine_arrow[1], color=ENGINE_ARROW_COLOR))
 
         lastmove = board.move_stack[-1] if board.move_stack else None
         svg_data = chess.svg.board(
@@ -967,15 +998,70 @@ class BoardWidget(QWidget):
 # Move list with hover tracking
 # --------------------------------------------------------------------------
 
+DARK_SEPARATOR_COLOR = QColor("#808080")  # light grey: visible on dark list backgrounds
+
+
+def _separator_color(widget: QWidget, option=None) -> QColor:
+    """Row/grid separator color shared by the score sheet and the book list:
+    light grey in dark mode (the style's own grid color is barely visible
+    there), the style's table grid color otherwise."""
+    if widget.palette().color(QPalette.ColorRole.Base).lightness() < 128:
+        return DARK_SEPARATOR_COLOR
+    if option is None:  # the style answers only with an option (else 0 = transparent)
+        option = QStyleOption()
+        option.initFrom(widget)
+    rgb = widget.style().styleHint(QStyle.StyleHint.SH_Table_GridLineColor, option, widget)
+    return QColor.fromRgba(rgb & 0xFFFFFFFF)
+
+
+class SeparatorFrame(QFrame):
+    """1 px outer border around a list, in the same _separator_color() as
+    the lines between its rows; replaces the list's own style frame."""
+
+    def __init__(self, inner: QAbstractScrollArea):
+        super().__init__()
+        self.inner = inner
+        inner.setFrameShape(QFrame.Shape.NoFrame)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.addWidget(inner)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setPen(_separator_color(self.inner))
+        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
+        painter.end()
+
+
+def _draw_item_text(painter, opt: QStyleOptionViewItem, index, indent: int, text: str):
+    """Draws an item's text left-aligned at `indent` px from the cell's left
+    edge, in the item's foreground color (or the selected-text color)."""
+    if opt.state & QStyle.StateFlag.State_Selected:
+        color = opt.palette.color(QPalette.ColorRole.HighlightedText)
+    else:
+        brush = index.data(Qt.ItemDataRole.ForegroundRole)
+        color = brush.color() if brush is not None else opt.palette.color(QPalette.ColorRole.Text)
+    painter.save()
+    painter.setFont(opt.font)
+    painter.setPen(color)
+    painter.drawText(
+        opt.rect.adjusted(indent, 0, 0, 0),
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        text,
+    )
+    painter.restore()
+
+
 class MoveItemDelegate(QStyledItemDelegate):
-    """Paints the row separator line and the hover background by hand.
+    """Paints the transposition and hover backgrounds, the row separator and
+    the text by hand. The text starts at list_widget.text_indent_fn() px,
+    so it can line up with the score sheet's moves.
     Deliberately not done via QSS (QListWidget::item { ... }) -- applying
     any stylesheet to ::item makes Qt's CSS engine take over painting for
     that sub-control, which silently stops respecting a background set via
     item.setBackground()/Qt::BackgroundRole. Painting both ourselves avoids
     that conflict entirely."""
 
-    SEPARATOR_COLOR = QColor("#cccccc")
     TRANSPOSITION_ROLE = Qt.ItemDataRole.UserRole + 1
 
     def __init__(self, list_widget: "HoverListWidget"):
@@ -984,15 +1070,23 @@ class MoveItemDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):
         item = self.list_widget.item(index.row())
-        super().paint(painter, option, index)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        opt.text = ""  # style draws background/selection only; text comes last
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
         if index.data(self.TRANSPOSITION_ROLE):
             painter.fillRect(option.rect, TRANSPOSITION_ROW_COLOR)
         if item is not None and item is self.list_widget.hovered_item:
             painter.fillRect(option.rect, HOVER_ROW_COLOR)  # translucent: blends on top
+        # same color as the score sheet's grid, light/dark aware
         painter.save()
-        painter.setPen(self.SEPARATOR_COLOR)
+        painter.setPen(_separator_color(self.list_widget, option))
         painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
         painter.restore()
+        indent_fn = self.list_widget.text_indent_fn
+        _draw_item_text(painter, opt, index, indent_fn() if indent_fn else 4, text)
 
 
 class HoverListWidget(QListWidget):
@@ -1003,6 +1097,7 @@ class HoverListWidget(QListWidget):
     def __init__(self):
         super().__init__()
         self.hovered_item: QListWidgetItem | None = None
+        self.text_indent_fn = None  # () -> px from cell's left edge to the text; see MoveItemDelegate
         self.setItemDelegate(MoveItemDelegate(self))
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(self.POLL_INTERVAL_MS)
@@ -1080,23 +1175,36 @@ class ManualSizeGrip(QWidget):
             event.accept()
 
 
+def _move_list_font(base: QFont) -> QFont:
+    """The font shared by all move lists: twice the default size."""
+    font = QFont(base)
+    if font.pointSize() > 0:
+        font.setPointSize(font.pointSize() * 2)
+    else:
+        font.setPixelSize(font.pixelSize() * 2)
+    return font
+
+
 class TranspositionsDialog(QDialog):
     """Lists every move order from the starting position to a transposition,
-    one PGN movetext line per row. Right-click copies a line (or all)."""
+    one PGN movetext line per row. Left-click loads a line via
+    on_select(moves), right-click copies its PGN."""
 
-    def __init__(self, lines: list[str], truncated: bool, parent=None):
+    def __init__(self, lines: list[tuple[str, list[chess.Move]]], truncated: bool, on_select, parent=None):
         super().__init__(parent)
         # No window title: the window manager decides its alignment (GNOME
         # centers it), so a left-aligned heading is shown inside instead.
         self.setWindowTitle(" ")  # " " not "": Qt replaces an empty title with the app name (otb.py)
-        self.resize(560, 300)
 
         self.list_widget = QListWidget()
-        self.list_widget.addItems(lines)
-        list_font = self.list_widget.font()
-        list_font.setPointSizeF(list_font.pointSizeF() * 1.25)
-        list_font.setBold(True)
-        self.list_widget.setFont(list_font)
+        for pgn, moves in lines:
+            item = QListWidgetItem(pgn)
+            item.setData(Qt.ItemDataRole.UserRole, moves)
+            self.list_widget.addItem(item)
+        self.list_widget.itemClicked.connect(
+            lambda item: on_select(item.data(Qt.ItemDataRole.UserRole))
+        )
+        self.list_widget.setFont(_move_list_font(self.list_widget.font()))  # same as the move lists
         c = HOVER_ROW_COLOR  # same grey as the main move list's hover
         self.list_widget.setStyleSheet(
             f"QListWidget::item:hover {{ background: rgba({c.red()}, {c.green()}, {c.blue()}, {c.alpha()}); }}"
@@ -1114,27 +1222,36 @@ class TranspositionsDialog(QDialog):
         caption = f"{len(lines)} move orders lead to the subsequent position"
         if truncated:
             caption += f" (only the first {len(lines)} shown)"
-        layout.addWidget(QLabel(caption + ".\nRight-click a line to copy the PGN."))
+        layout.addWidget(QLabel(caption + ".\nLeft-click a line to load it, right-click to copy the PGN."))
         layout.addWidget(self.list_widget)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+        # Big enough for the longest line and all lines (plus margins, a
+        # scrollbar and the heading/buttons), capped at 90% of the screen
+        # width and 70% of its height; beyond that the list scrolls.
+        lw = self.list_widget
+        content_width = lw.sizeHintForColumn(0) + 2 * lw.frameWidth()
+        content_width += lw.verticalScrollBar().sizeHint().width() + 40
+        rows = max(lw.count(), 1)
+        # +1 row of slack: the hover stylesheet adds padding the size hint misses
+        list_height = (rows + 1) * lw.sizeHintForRow(0) + 2 * lw.frameWidth()
+        content_height = list_height + self.sizeHint().height() - lw.sizeHint().height() + 8
+        screen = self.screen().availableGeometry() if self.screen() else None
+        max_width = int(screen.width() * 0.9) if screen else content_width
+        max_height = int(screen.height() * 0.7) if screen else content_height
+        self.resize(max(560, min(content_width, max_width)), max(300, min(content_height, max_height)))
+
     def _on_context_menu(self, pos):
         item = self.list_widget.itemAt(pos)
-        menu = QMenu(self)
-        copy_action = menu.addAction("Copy") if item is not None else None
-        copy_all_action = menu.addAction("Copy all")
-        chosen = menu.exec(self.list_widget.mapToGlobal(pos))
-        clipboard = QApplication.clipboard()
-        if chosen is None:
+        if item is None:
             return
-        if chosen == copy_action:
-            clipboard.setText(f"{item.text()} *\n")  # '*' = PGN result terminator (unknown)
-        elif chosen == copy_all_action:
-            # one PGN game per line, separated by blank lines
-            texts = [self.list_widget.item(i).text() for i in range(self.list_widget.count())]
-            clipboard.setText("\n\n".join(f"{t} *" for t in texts) + "\n")
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy PGN")
+        if menu.exec(self.list_widget.mapToGlobal(pos)) == copy_action:
+            # '*' = PGN result terminator (unknown)
+            QApplication.clipboard().setText(f"{item.text()} *\n")
 
 
 class FenSearchDialog(QDialog):
@@ -1180,6 +1297,85 @@ class FenSearchDialog(QDialog):
             self.result_label.setText(self.search(fen))
 
 
+class LineMoveDelegate(QStyledItemDelegate):
+    """Left-aligns all moves at a common indent, chosen so that a long
+    reference move (REFERENCE_SAN) would sit centered in the cell. Short
+    moves like e4 then line up with long ones instead of each being
+    centered on its own."""
+
+    REFERENCE_SAN = "Naxd4"
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        opt.text = ""  # let the style draw background/selection only
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+
+        _draw_item_text(painter, opt, index, self.indent(opt.rect.width(), opt.fontMetrics), text)
+        painter.save()
+        painter.setPen(_separator_color(opt.widget, option))
+        painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
+        painter.drawLine(option.rect.topRight(), option.rect.bottomRight())
+        painter.restore()
+
+    @classmethod
+    def indent(cls, cell_width: int, metrics) -> int:
+        return max(4, (cell_width - metrics.horizontalAdvance(cls.REFERENCE_SAN)) // 2)
+
+
+class LineTable(QTableWidget):
+    """The current line as a two-column score sheet (White | Black, move
+    numbers as row headers). The move leading to the current position is
+    selected, moves after it are greyed out; clicking a move emits the ply
+    to jump to."""
+
+    plyClicked = pyqtSignal(int)
+    AHEAD_COLOR = QColor("#888888")
+
+    def __init__(self):
+        super().__init__(0, 2)
+        self.horizontalHeader().hide()
+        self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.horizontalHeader().setHighlightSections(False)  # no bold "Black" on selection
+        self.verticalHeader().setHighlightSections(False)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setWordWrap(False)
+        self.setItemDelegate(LineMoveDelegate(self))
+        self.cellClicked.connect(self._on_cell_clicked)
+        # Grid drawn by LineMoveDelegate instead, in _separator_color() --
+        # QTableView's own grid color can only be changed via a stylesheet,
+        # which also restyles (and shrinks) the row-number header.
+        self.setShowGrid(False)
+
+    def set_line(self, sans: list[str], current_ply: int):
+        self.blockSignals(True)
+        self.clearSelection()
+        self.setRowCount((len(sans) + 1) // 2)
+        self.clearContents()
+        for i, san in enumerate(sans):
+            item = QTableWidgetItem(san)  # alignment: see LineMoveDelegate
+            if i >= current_ply:
+                item.setForeground(QBrush(self.AHEAD_COLOR))
+            self.setItem(i // 2, i % 2, item)
+        self.setVerticalHeaderLabels([str(n) for n in range(1, self.rowCount() + 1)])
+        if current_ply > 0:
+            row, col = divmod(current_ply - 1, 2)
+            self.setCurrentCell(row, col)
+            self.scrollToItem(self.item(row, col))
+        else:
+            self.scrollToTop()
+        self.blockSignals(False)
+
+    def _on_cell_clicked(self, row: int, col: int):
+        if self.item(row, col) is not None:  # empty Black cell after White's last move
+            self.plyClicked.emit(row * 2 + col + 1)
+
+
 # --------------------------------------------------------------------------
 # Main window
 # --------------------------------------------------------------------------
@@ -1213,39 +1409,56 @@ class MainWindow(QMainWindow):
         self.board_widget = BoardWidget(lambda: self.board, lambda: self.mode, self.play_move)
 
         self.move_list = HoverListWidget()
-        list_font = self.move_list.font()
-        if list_font.pointSize() > 0:
-            list_font.setPointSize(list_font.pointSize() * 2)
-        else:
-            list_font.setPixelSize(list_font.pixelSize() * 2)
+        list_font = _move_list_font(self.move_list.font())
         self.move_list.setFont(list_font)
         self.move_list.itemClicked.connect(self._on_item_clicked)
         self.move_list.hoverChanged.connect(self._on_item_hover_changed)
         self.move_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.move_list.customContextMenuRequested.connect(self._on_context_menu)
 
+        self.line_table = LineTable()
+        self.line_table.setFont(list_font)  # same size as the book move list
+        # book moves keep the same gap from their cell's left border as the
+        # score sheet's moves do inside their cells
+        self.move_list.text_indent_fn = lambda: LineMoveDelegate.indent(
+            self.line_table.columnWidth(0), self.line_table.fontMetrics()
+        )
+        self.line_table.plyClicked.connect(self.goto_ply)
+        self.line_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.line_table.customContextMenuRequested.connect(self._on_line_context_menu)
+
         self.btn_start = QPushButton()
         self.btn_start.setIcon(_make_skip_start_icon())
         self.btn_start.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
-        self.btn_start.setToolTip("Go to start")
+        self.btn_start.setToolTip("Go to start (Home)")
 
         self.btn_back = QPushButton()
         self.btn_back.setIcon(_make_step_back_icon())
         self.btn_back.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
-        self.btn_back.setToolTip("Step back")
+        self.btn_back.setToolTip("Step back (←)")
+
+        self.btn_forward = QPushButton()
+        self.btn_forward.setIcon(_make_step_forward_icon())
+        self.btn_forward.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
+        self.btn_forward.setToolTip("Step forward (→)")
+
+        self.btn_end = QPushButton()
+        self.btn_end.setIcon(_make_skip_end_icon())
+        self.btn_end.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
+        self.btn_end.setToolTip("Go to end (End)")
 
         self.btn_flip = QPushButton()
         self.btn_flip.setIcon(_make_flip_icon())
         self.btn_flip.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
-        self.btn_flip.setToolTip("Flip board")
+        self.btn_flip.setToolTip("Flip board (F)")
 
-        for btn in (self.btn_start, self.btn_back, self.btn_flip):
+        for btn in (self.btn_start, self.btn_back, self.btn_forward, self.btn_end, self.btn_flip):
             btn.setStyleSheet(NAV_BUTTON_STYLE)
 
         self.engine_label = QLabel()
         self.engine_label.setToolTip("Engine")
         self.engine_toggle = ToggleSwitch()
-        self.engine_toggle.setToolTip("Engine")
+        self.engine_toggle.setToolTip("Engine (E)")
 
         self.mode_switch = ModeSwitch()
         self.mode_switch.setToolTip("View / Build mode")
@@ -1259,6 +1472,8 @@ class MainWindow(QMainWindow):
 
         self.btn_start.clicked.connect(self.goto_start)
         self.btn_back.clicked.connect(self.step_back)
+        self.btn_forward.clicked.connect(self.step_forward)
+        self.btn_end.clicked.connect(self.goto_end)
         self.btn_flip.clicked.connect(self.board_widget.flip)
         self.engine_toggle.toggled.connect(self._on_engine_toggle_changed)
         self.mode_switch.toggled.connect(lambda checked: self._set_mode("BUILD" if checked else "VIEW"))
@@ -1268,20 +1483,17 @@ class MainWindow(QMainWindow):
         nav_grid.setVerticalSpacing(6)
         # spans both columns, so it's exactly as wide as start+back combined
         nav_grid.addWidget(self.mode_switch, 0, 0, 1, 2)
-        nav_grid.addWidget(self.btn_start, 1, 0)
-        nav_grid.addWidget(self.btn_back, 1, 1)
-        nav_grid.addWidget(self.btn_flip, 2, 0)
+        nav_grid.addWidget(self.btn_flip, 1, 0)
         engine_group = QHBoxLayout()
         engine_group.addStretch()  # icon centered in the free space left of the toggle
         engine_group.addWidget(self.engine_label)
         engine_group.addStretch()  # switch stays pinned right
         engine_group.addWidget(self.engine_toggle)
-        nav_grid.addLayout(engine_group, 2, 1, alignment=Qt.AlignmentFlag.AlignVCenter)  # fills width, centered vertically with btn_flip
+        nav_grid.addLayout(engine_group, 1, 1, alignment=Qt.AlignmentFlag.AlignVCenter)  # fills width, centered vertically with btn_flip
 
-        # Without this, column 1 (btn_back + engine_group) would size itself
-        # wider than column 0 (btn_start/btn_flip alone), since the engine
-        # group needs more room than a single icon-only button -- stretching
-        # btn_back to match and breaking "all three buttons same size".
+        # Without this, column 1 (engine_group) would size itself wider than
+        # column 0 (btn_flip alone), since the engine group needs more room
+        # than a single icon-only button.
         # Forcing both columns to the same explicit minimum keeps every
         # button identical while still giving the engine group enough room.
         # Uses the full-size (pre-shrink) engine footprint deliberately: the
@@ -1289,14 +1501,40 @@ class MainWindow(QMainWindow):
         # but the column width itself must stay independent of that, or
         # shrinking the toggle would shrink the buttons back down too.
         full_engine_width = nav_button_height + 6 + int(nav_button_height * 1.9)
-        column_width = max(self.btn_start.sizeHint().width(), full_engine_width)
+        column_width = max(self.btn_flip.sizeHint().width(), full_engine_width)
         nav_grid.setColumnMinimumWidth(0, column_width)
         nav_grid.setColumnMinimumWidth(1, column_width)
+        # equal stretch: both columns split the panel width exactly in half,
+        # like the two-column navigation grid below the score sheet
+        nav_grid.setColumnStretch(0, 1)
+        nav_grid.setColumnStretch(1, 1)
 
+        # Navigation below the score sheet: backward left, forward right
+        # |<  >|  (start, end)
+        # <   >   (back, forward)
+        line_nav = QGridLayout()
+        line_nav.setHorizontalSpacing(6)
+        line_nav.setVerticalSpacing(6)
+        line_nav.addWidget(self.btn_start, 0, 0)
+        line_nav.addWidget(self.btn_end, 0, 1)
+        line_nav.addWidget(self.btn_back, 1, 0)
+        line_nav.addWidget(self.btn_forward, 1, 1)
+        line_nav.setColumnStretch(0, 1)
+        line_nav.setColumnStretch(1, 1)
+        line_panel = QVBoxLayout()
+        line_panel.setContentsMargins(0, 0, 0, 0)
+        line_panel.addWidget(SeparatorFrame(self.line_table))
+        line_panel.addLayout(line_nav)
+        line_widget = QWidget()
+        line_widget.setLayout(line_panel)
+        line_widget.setFixedWidth(LINE_PANEL_WIDTH)
+
+        # Controls below the lists in both panels: the lists start level with
+        # the board's top edge, the controls form one strip along its bottom.
         right = QVBoxLayout()
         right.setContentsMargins(0, 0, 0, 0)
+        right.addWidget(SeparatorFrame(self.move_list))
         right.addLayout(nav_grid)
-        right.addWidget(self.move_list)
         right_widget = QWidget()
         right_widget.setLayout(right)
         right_widget.setFixedWidth(RIGHT_PANEL_WIDTH)
@@ -1304,8 +1542,24 @@ class MainWindow(QMainWindow):
         central = QWidget()
         layout = QHBoxLayout(central)
         layout.addWidget(self.board_widget)
+        layout.addWidget(line_widget)
         layout.addWidget(right_widget)
         self.setCentralWidget(central)
+
+        # Keyboard navigation along the current line (window-wide, so it
+        # works whichever list has focus).
+        for key, slot in (
+            (Qt.Key.Key_Left, self.step_back),
+            (Qt.Key.Key_Right, self.step_forward),
+            (Qt.Key.Key_Home, self.goto_start),
+            (Qt.Key.Key_End, self.goto_end),
+        ):
+            QShortcut(QKeySequence(key), self, activated=slot)
+        # f = flip board, e = engine on/off; Shift variants so caps lock /
+        # uppercase works too
+        for letter, slot in (("F", self.board_widget.flip), ("E", self.engine_toggle.toggle)):
+            for seq in (letter, f"Shift+{letter}"):
+                QShortcut(QKeySequence(seq), self, activated=slot)
 
         self._build_menu()
         self.setStatusBar(QStatusBar())
@@ -1321,22 +1575,9 @@ class MainWindow(QMainWindow):
         self.eval_label.setMinimumWidth(self.eval_label.fontMetrics().horizontalAdvance("-99.99") + 12)
         self.eval_label.setToolTip("Engine evaluation (from White's point of view)")
         self.statusBar().addWidget(self.eval_label)  # leftmost, before the status text
-        # Two rows next to the eval: status text on top, current FEN below
-        # (selectable, so it can be copied). Ignored size policy so long
-        # texts never force the window wider.
         self.status_label = QLabel()
         self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.fen_label = QLabel()
-        self.fen_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.fen_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.fen_label.setToolTip("FEN of the current position (select to copy)")
-        status_rows = QWidget()
-        status_layout = QVBoxLayout(status_rows)
-        status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(0)
-        status_layout.addWidget(self.status_label)
-        status_layout.addWidget(self.fen_label)
-        self.statusBar().addWidget(status_rows, 1)
+        self.statusBar().addWidget(self.status_label, 1)
         size_grip = ManualSizeGrip(self)
         self.statusBar().addPermanentWidget(size_grip)
 
@@ -1538,22 +1779,43 @@ class MainWindow(QMainWindow):
         return count
 
     def _path_to_key(self, target_key: int) -> list[chess.Move] | None:
-        """Shortest move sequence in the book from the starting position to
-        the position with target_key (breadth-first over the cached
-        resulting_key edges), or None if the book never reaches it."""
+        """The most weighted line in the book from the starting position to
+        the position with target_key, or None if the book never reaches it.
+
+        Among all shortest move orders (transpositions have equal length;
+        restricting to shortest also keeps cycles like Nf3 Nf6 Ng1 Ng8 out),
+        picks the one with the highest total weight. Breadth-first over the
+        cached resulting_key edges gives the distances, then one pass in BFS
+        order keeps the best-scoring incoming edge per position."""
         start_key = chess.polyglot.zobrist_hash(chess.Board())
         entries_by_key = self._index_entries_by_key()
-        parent: dict[int, tuple[int, BookEntry] | None] = {start_key: None}
+        dist: dict[int, int] = {start_key: 0}
+        order: list[int] = []
         queue: deque[int] = deque([start_key])
-        while queue and target_key not in parent:
+        while queue:
             key = queue.popleft()
+            if target_key in dist and dist[key] >= dist[target_key]:
+                break  # every predecessor of the target is already expanded
+            order.append(key)
             for e in entries_by_key.get(key, []):
                 child_key = e.resulting_key
-                if child_key is not None and child_key not in parent:
-                    parent[child_key] = (key, e)
+                if child_key is not None and child_key not in dist:
+                    dist[child_key] = dist[key] + 1
                     queue.append(child_key)
-        if target_key not in parent:
+        if target_key not in dist:
             return None
+
+        best: dict[int, int] = {start_key: 0}
+        parent: dict[int, tuple[int, BookEntry] | None] = {start_key: None}
+        for key in order:
+            for e in entries_by_key.get(key, []):
+                child_key = e.resulting_key
+                if child_key is None or dist.get(child_key) != dist[key] + 1:
+                    continue
+                score = best[key] + e.weight
+                if score > best.get(child_key, -1):
+                    best[child_key] = score
+                    parent[child_key] = (key, e)
 
         path: list[BookEntry] = []
         key = target_key
@@ -1580,10 +1842,7 @@ class MainWindow(QMainWindow):
         moves = self._path_to_key(chess.polyglot.zobrist_hash(target))
         if moves is None:
             return "Position not found in the book."
-        self.game_moves = moves
-        self.ply = len(moves)
-        self._rebuild_board()
-        self.refresh()
+        self._load_line(moves)
         if not moves:
             return "Found: this is the starting position."
         return f"Found. Path to this position:\n\n{chess.Board().variation_san(moves)}"
@@ -1598,6 +1857,14 @@ class MainWindow(QMainWindow):
             self.ply -= 1
             self._rebuild_board()
             self.refresh()
+
+    def goto_ply(self, ply: int):
+        self.ply = max(0, min(ply, len(self.game_moves)))
+        self._rebuild_board()
+        self.refresh()
+
+    def goto_end(self):
+        self.goto_ply(len(self.game_moves))
 
     def step_forward(self):
         if self.ply < len(self.game_moves):
@@ -1895,8 +2162,34 @@ class MainWindow(QMainWindow):
 
     def _show_transpositions(self, entry: BookEntry):
         move_lists, truncated = self._move_lists_to(entry.resulting_key)
-        lines = sorted(chess.Board().variation_san(moves) for moves in move_lists)
-        TranspositionsDialog(lines, truncated, self).exec()
+        lines = sorted(((chess.Board().variation_san(moves), moves) for moves in move_lists), key=lambda line: line[0])
+        TranspositionsDialog(lines, truncated, self._load_line, self).exec()
+
+    def _on_line_context_menu(self, pos):
+        index = self.line_table.indexAt(pos)
+        if not index.isValid() or self.line_table.item(index.row(), index.column()) is None:
+            return
+        ply = index.row() * 2 + index.column() + 1
+        moves = self.game_moves[:ply]
+        menu = QMenu(self)
+        copy_fen_action = menu.addAction("Copy FEN")
+        copy_pgn_action = menu.addAction("Copy PGN")
+        chosen = menu.exec(self.line_table.viewport().mapToGlobal(pos))
+        if chosen == copy_fen_action:
+            board = chess.Board()
+            for move in moves:
+                board.push(move)
+            QApplication.clipboard().setText(board.fen())
+        elif chosen == copy_pgn_action:
+            # '*' = PGN result terminator (unknown), as in the Transpositions dialog
+            QApplication.clipboard().setText(f"{chess.Board().variation_san(moves)} *\n")
+
+    def _load_line(self, moves: list[chess.Move]):
+        """Makes moves the current line and jumps to its end."""
+        self.game_moves = list(moves)
+        self.ply = len(self.game_moves)
+        self._rebuild_board()
+        self.refresh()
 
     def _on_context_menu(self, pos):
         item = self.move_list.itemAt(pos)
@@ -1972,10 +2265,14 @@ class MainWindow(QMainWindow):
         self.board_widget.set_engine_arrow(None)
         self.eval_label.setText("")  # stale until the engine reports for the new position
         self._populate_move_list()
+        self._update_line_table()
         self._update_status()
         self.board_widget.redraw()
         self.btn_start.setEnabled(self.ply > 0)
         self.btn_back.setEnabled(self.ply > 0)
+        at_end = self.ply >= len(self.game_moves)
+        self.btn_forward.setEnabled(not at_end)
+        self.btn_end.setEnabled(not at_end)
         if self.engine_active and self.engine_worker is not None:
             self.board_widget.set_engine_arrow(None)
             self.engine_worker.start(self.board)
@@ -2001,6 +2298,14 @@ class MainWindow(QMainWindow):
             item.setForeground(QBrush(_icon_color()))
             self.move_list.addItem(item)
 
+    def _update_line_table(self):
+        board = chess.Board()
+        sans = []
+        for move in self.game_moves:
+            sans.append(board.san(move))
+            board.push(move)
+        self.line_table.set_line(sans, self.ply)
+
     def _update_status(self):
         board = self.board
         if board.is_checkmate():
@@ -2009,9 +2314,8 @@ class MainWindow(QMainWindow):
             msg = "Stalemate"
         else:
             check = "Check — " if board.is_check() else ""
-            msg = f"{check}ply {self.ply}/{len(self.game_moves)} — book: {self.book_path}"
+            msg = f"{check}book: {self.book_path}"
         self.status_label.setText(msg)
-        self.fen_label.setText(f"FEN: {board.fen()}")
 
 
 def main():
