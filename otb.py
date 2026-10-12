@@ -73,6 +73,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -1136,6 +1137,49 @@ class TranspositionsDialog(QDialog):
             clipboard.setText("\n\n".join(f"{t} *" for t in texts) + "\n")
 
 
+class FenSearchDialog(QDialog):
+    """Asks for a FEN and shows the result of search(fen) -> message below
+    the input; the dialog stays open so another FEN can be tried."""
+
+    def __init__(self, search, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(" ")
+        self.resize(560, 220)
+        self.search = search
+
+        heading = QLabel("Search for Position by FEN")
+        heading_font = heading.font()
+        heading_font.setBold(True)
+        heading_font.setPointSizeF(heading_font.pointSizeF() * 1.4)
+        heading.setFont(heading_font)
+
+        self.fen_edit = QLineEdit()
+        self.fen_edit.setPlaceholderText("e.g. rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1")
+        self.fen_edit.setClearButtonEnabled(True)
+
+        self.result_label = QLabel()
+        self.result_label.setWordWrap(True)
+        self.result_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        buttons = QDialogButtonBox()
+        search_button = buttons.addButton("Search", QDialogButtonBox.ButtonRole.AcceptRole)
+        search_button.setDefault(True)  # Enter in the FEN field searches
+        buttons.addButton(QDialogButtonBox.StandardButton.Close)
+        buttons.accepted.connect(self._on_search)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(heading)
+        layout.addWidget(self.fen_edit)
+        layout.addWidget(self.result_label, 1)
+        layout.addWidget(buttons)
+
+    def _on_search(self):
+        fen = self.fen_edit.text().strip()
+        if fen:
+            self.result_label.setText(self.search(fen))
+
+
 # --------------------------------------------------------------------------
 # Main window
 # --------------------------------------------------------------------------
@@ -1277,9 +1321,22 @@ class MainWindow(QMainWindow):
         self.eval_label.setMinimumWidth(self.eval_label.fontMetrics().horizontalAdvance("-99.99") + 12)
         self.eval_label.setToolTip("Engine evaluation (from White's point of view)")
         self.statusBar().addWidget(self.eval_label)  # leftmost, before the status text
+        # Two rows next to the eval: status text on top, current FEN below
+        # (selectable, so it can be copied). Ignored size policy so long
+        # texts never force the window wider.
         self.status_label = QLabel()
         self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.statusBar().addWidget(self.status_label, 1)
+        self.fen_label = QLabel()
+        self.fen_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.fen_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.fen_label.setToolTip("FEN of the current position (select to copy)")
+        status_rows = QWidget()
+        status_layout = QVBoxLayout(status_rows)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(0)
+        status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.fen_label)
+        self.statusBar().addWidget(status_rows, 1)
         size_grip = ManualSizeGrip(self)
         self.statusBar().addPermanentWidget(size_grip)
 
@@ -1308,6 +1365,11 @@ class MainWindow(QMainWindow):
         select_engine_action = QAction("Select Engine…", self)
         select_engine_action.triggered.connect(self._select_engine_dialog)
         file_menu.addAction(select_engine_action)
+
+        search_menu = self.menuBar().addMenu("Search")
+        search_fen_action = QAction("Search for Position by FEN…", self)
+        search_fen_action.triggered.connect(lambda: FenSearchDialog(self._search_fen, self).exec())
+        search_menu.addAction(search_fen_action)
 
         help_menu = self.menuBar().addMenu("Help")
         getting_started_action = QAction("Getting Started", self)
@@ -1474,6 +1536,57 @@ class MainWindow(QMainWindow):
             count += self._import_game_tree(child, board, index)
             board.pop()
         return count
+
+    def _path_to_key(self, target_key: int) -> list[chess.Move] | None:
+        """Shortest move sequence in the book from the starting position to
+        the position with target_key (breadth-first over the cached
+        resulting_key edges), or None if the book never reaches it."""
+        start_key = chess.polyglot.zobrist_hash(chess.Board())
+        entries_by_key = self._index_entries_by_key()
+        parent: dict[int, tuple[int, BookEntry] | None] = {start_key: None}
+        queue: deque[int] = deque([start_key])
+        while queue and target_key not in parent:
+            key = queue.popleft()
+            for e in entries_by_key.get(key, []):
+                child_key = e.resulting_key
+                if child_key is not None and child_key not in parent:
+                    parent[child_key] = (key, e)
+                    queue.append(child_key)
+        if target_key not in parent:
+            return None
+
+        path: list[BookEntry] = []
+        key = target_key
+        while parent[key] is not None:
+            key, e = parent[key]
+            path.append(e)
+        board = chess.Board()
+        moves: list[chess.Move] = []
+        for e in reversed(path):
+            move = decode_move(board, e)
+            if move is None:
+                return None  # stale/colliding entry
+            moves.append(move)
+            board.push(move)
+        return moves
+
+    def _search_fen(self, fen: str) -> str:
+        """FenSearchDialog callback: jumps the board to the position if the
+        book contains it and returns the message to show."""
+        try:
+            target = chess.Board(fen)
+        except ValueError as exc:
+            return f"Invalid FEN: {exc}"
+        moves = self._path_to_key(chess.polyglot.zobrist_hash(target))
+        if moves is None:
+            return "Position not found in the book."
+        self.game_moves = moves
+        self.ply = len(moves)
+        self._rebuild_board()
+        self.refresh()
+        if not moves:
+            return "Found: this is the starting position."
+        return f"Found. Path to this position:\n\n{chess.Board().variation_san(moves)}"
 
     def goto_start(self):
         self.ply = 0
@@ -1890,19 +2003,15 @@ class MainWindow(QMainWindow):
 
     def _update_status(self):
         board = self.board
-        mode_str = f"[{self.mode} mode]"
         if board.is_checkmate():
-            msg = f"{mode_str} Checkmate — {'Black' if board.turn else 'White'} wins"
+            msg = f"Checkmate — {'Black' if board.turn else 'White'} wins"
         elif board.is_stalemate():
-            msg = f"{mode_str} Stalemate"
+            msg = "Stalemate"
         else:
-            side = "White" if board.turn else "Black"
-            check = " (check)" if board.is_check() else ""
-            msg = (
-                f"{mode_str} {side} to move{check} — ply {self.ply}/{len(self.game_moves)} "
-                f"— book: {self.book_path}"
-            )
+            check = "Check — " if board.is_check() else ""
+            msg = f"{check}ply {self.ply}/{len(self.game_moves)} — book: {self.book_path}"
         self.status_label.setText(msg)
+        self.fen_label.setText(f"FEN: {board.fen()}")
 
 
 def main():
