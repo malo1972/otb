@@ -920,6 +920,17 @@ class BoardWidget(QWidget):
             self.drag_label.deleteLater()
             self.drag_label = None
 
+    def clear_selection(self):
+        """Drops a clicked/dragged piece selection. Called whenever the shown
+        position changes from outside the board (move list, book list,
+        keys, buttons): otherwise the old start square and its targets
+        reappear as soon as the same side is to move again."""
+        if self.drag_label is not None:
+            self._end_drag_label()
+        self.selected = None
+        self.dragging = False
+        self.press_pos = None
+
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
         square = self._square_at(pos)
@@ -1005,6 +1016,19 @@ class BoardWidget(QWidget):
 
 DARK_SEPARATOR_COLOR = QColor("#808080")  # light grey: visible on dark list backgrounds
 
+# Dark mode only: lighter track + clearly lighter handle, since many dark
+# themes draw both almost in the list's background color. Applied to the
+# scroll bars themselves, so the lists' own look (fonts, headers) is untouched.
+DARK_SCROLLBAR_STYLE = """
+QScrollBar:vertical { background: #3c3c3c; width: 14px; margin: 0; }
+QScrollBar:horizontal { background: #3c3c3c; height: 14px; margin: 0; }
+QScrollBar::handle:vertical { background: #8c8c8c; min-height: 28px; border-radius: 5px; margin: 2px; }
+QScrollBar::handle:horizontal { background: #8c8c8c; min-width: 28px; border-radius: 5px; margin: 2px; }
+QScrollBar::handle:hover { background: #b0b0b0; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }
+"""
+
 
 def _separator_color(widget: QWidget, option=None) -> QColor:
     """Row/grid separator color shared by the score sheet and the book list:
@@ -1030,6 +1054,19 @@ class SeparatorFrame(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(1, 1, 1, 1)
         layout.addWidget(inner)
+        self._style_scrollbars()
+
+    def _style_scrollbars(self):
+        dark = self.inner.palette().color(QPalette.ColorRole.Base).lightness() < 128
+        sheet = DARK_SCROLLBAR_STYLE if dark else ""
+        for bar in (self.inner.verticalScrollBar(), self.inner.horizontalScrollBar()):
+            if bar.styleSheet() != sheet:  # avoid restyling loops via PaletteChange
+                bar.setStyleSheet(sheet)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.PaletteChange:  # light/dark switch at runtime
+            self._style_scrollbars()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -2346,6 +2383,7 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def refresh(self):
+        self.board_widget.clear_selection()
         self.board_widget.set_hover_arrow(None)
         self.board_widget.set_engine_arrow(None)
         self.eval_label.setText("")  # stale until the engine reports for the new position
