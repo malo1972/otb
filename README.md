@@ -18,48 +18,43 @@ The currently used book and further status information is displayed in the botto
 
 You can also expand your opening tree by importing PGN-files via <kbd>File</kbd> &rarr;   <kbd>Import PGN...</kbd> (e.g. PGN's that you exported from other tools).
 
-Deletion is done via right-click on a move in build-mode.   
+**<ins>Deletion</ins>** is done via right-click on a move in build-mode.   
 CAUTION: all attached branches to follow behind that node will also be deleted.   
 Right-click also lets you edit a move's weight (how often it is chosen by engines/GUIs using the book).   
 
-Transpositions are chess positions, that can be reached via multiple paths in the opening tree. The predecessor-moves to a transposition are marked in red in the move list on the right-hand side.   
-Right-click a red move and choose "Transpositions" (in both modes) to see every move order leading there, as PGN. Right-click a line to copy it (or all of them) to paste into other tools.
+**<ins>Transpositions</ins>** are chess positions, that can be reached by different move orders.\
+The predecessor-moves to a transposition are marked in red in the bookmove-list.\   
+Right-click transpositions to see all move orders leading there.\
+Left-click a line to load it to the editor, right-click to copy it as PGN.
 
-## How to Run OTB
+## Install OTB
 
-For quick evaluation and distribution the python package is managed by `uv`:   
-https://docs.astral.sh/uv/
+### Windows
+**[⬇ Download the installer (OTB-Setup-1.0.exe)](https://github.com/malo1972/otb/releases/download/v1.0/OTB-Setup-1.0.exe)**
 
-Installers will soon be added for every OS...
+Run the downloaded file and follow the installer — no Python or admin rights needed. It adds OTB to the Start menu (and, if you like, to the desktop).   
+Windows may show *"Windows protected your PC"*: click **More info** &rarr; **Run anyway**.
 
-### Download
-**[⬇ Download OTB (zip)](https://github.com/malo1972/otb/archive/refs/heads/main.zip)** — unzip it into a folder of your choice. It contains:
-* `otb.py` : the single-file python code 
-* `pyproject.toml` : description of dependencies. Used by `uv` to create a virtual environment
-* `uv.lock` : the currently used dependencies for reproducible builds
+---
 
-### Install `uv` (One-time setup)
-- **macOS / Linux:** Run this in your terminal:
-  ```
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  ```
-- **Windows:** Run this in PowerShell:
-  ```
-  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-  ```
+### Mac / Linux
+OTB runs directly from source, managed by [`uv`](https://docs.astral.sh/uv/):
 
-### Launch the Application
-Open a terminal in the project folder and run:
+**1.** **[⬇ Download OTB (zip)](https://github.com/malo1972/otb/archive/refs/heads/main.zip)** and unzip it into a folder of your choice.
+
+**2.** Install `uv` (one-time setup) in your terminal:
+```
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**3.** Open a terminal in the OTB folder and run:
 ```
 uv run otb.py
 ```
-- **Windows** :
-  you can create a shortcut in explorer: Right-click within your project-folder and select <kbd>new</kbd> &rarr; <kbd>shortcut</kbd>. Then enter this to the location field (replace path):
-  ```
-  C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -NoExit -Command "Set-Location 'C:\path\to\project'; uv run otb.py"
-  ```
 
 *(This automatically downloads Python if needed, creates a virtual environment, installs PyQt6 and python-chess, and launches the app.)*
+
+---
 
 ### Use an Engine
 
