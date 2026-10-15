@@ -1661,6 +1661,9 @@ class MainWindow(QMainWindow):
 
         self.engine_label = QLabel()
         self.engine_toggle = ToggleSwitch()
+        # no keyboard focus: Space on a focused switch would toggle it past
+        # the "no engine" check; E is the keyboard shortcut instead
+        self.engine_toggle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         self.mode_switch = ModeSwitch()
         self.mode_switch.setToolTip("View / Build mode")
@@ -2141,18 +2144,15 @@ class MainWindow(QMainWindow):
 
     def _start_engine(self):
         if self.engine_worker is None:
-            settings = _settings()
-            path = settings.value("engine_path", type=str)
-
-            if not path or not os.path.exists(path):
-                path, _ = QFileDialog.getOpenFileName(
-                    self, "Select UCI engine executable", "", "All files (*)"
-                )
-                if not path:
-                    self._sync_engine_toggle()  # user cancelled: uncheck again
-                    return
-                settings.setValue("engine_path", path)
+            path = self._engine_path()
+            if path is None:
+                # No usable engine (e.g. right after install, or the file was
+                # removed): never open a file dialog from here -- switch back
+                # off and explain, whatever turned the switch on.
                 self._update_engine_availability()
+                self._sync_engine_toggle()
+                self._explain_no_engine()
+                return
 
             self.engine_worker = EngineWorker(path)
             self.engine_worker.best_move_found.connect(self._on_engine_best_move)
