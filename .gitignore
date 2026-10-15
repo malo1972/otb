@@ -8,3 +8,8 @@ venv/
 # Exclude Python bytecode caches
 __pycache__/
 *.pyc
+
+# Installer build output (PyInstaller / Inno Setup)
+build/
+dist/
+packaging/Output/

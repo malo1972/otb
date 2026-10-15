@@ -1,0 +1,75 @@
+# Builds the Windows installer (PyInstaller + Inno Setup).
+#
+# - Push a tag like v1.0  -> builds OTB-Setup-1.0.exe and publishes it as a
+#                            GitHub Release (the tag must match APP_VERSION).
+# - "Run workflow" button -> test build only, installer downloadable from the
+#   (Actions tab)             run's artifacts; no release is created.
+name: Windows installer
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to create the release on tag builds
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version from otb.py
+        id: version
+        shell: pwsh
+        run: |
+          $match = Select-String -Path otb.py -Pattern '^APP_VERSION = "(.+)"'
+          if (-not $match) { throw "APP_VERSION not found in otb.py" }
+          $version = $match.Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Tag $env:GITHUB_REF_NAME does not match APP_VERSION $version (expected v$version)"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Build OTB.exe (PyInstaller)
+        # --onedir (default) starts faster and triggers far fewer antivirus
+        # false positives than --onefile; the installer hides the folder.
+        # Absolute paths: with --specpath, relative ones would resolve against build/.
+        run: >
+          uv run --with pyinstaller pyinstaller otb.py
+          --name OTB --windowed --noconfirm --clean
+          --icon "${{ github.workspace }}/packaging/otb.ico"
+          --add-data "${{ github.workspace }}/otb_icon.png:."
+          --distpath dist --workpath build --specpath build
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.version.outputs.version }}" packaging\otb.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OTB-Setup-${{ steps.version.outputs.version }}
+          path: packaging/Output/OTB-Setup-*.exe
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OTB ${{ steps.version.outputs.version }}
+          files: packaging/Output/OTB-Setup-*.exe
+          generate_release_notes: true

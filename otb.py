@@ -42,6 +42,7 @@ from PyQt6.QtCore import (
     QPropertyAnimation,
     QRectF,
     QSettings,
+    QStandardPaths,
     QSize,
     Qt,
     QTimer,
@@ -109,7 +110,9 @@ DRAG_THRESHOLD = 6  # px of mouse movement before a press counts as a drag
 HOVER_ARROW_COLOR = "#ffcc00"         # yellow
 ENGINE_ARROW_COLOR = "#0066ff"        # blue, continuously-updating engine best move
 DRAG_SOURCE_COLOR = "#ffff0088"       # semi-transparent yellow for start square
-APP_VERSION = "0.1"
+APP_VERSION = "1.0"
+APP_ORG = "GambitGear"  # shared by all GambitGear apps: data/settings live under GambitGear/<app>
+APP_NAME = "OTB"
 USER_GUIDE_URL = "https://github.com/malo1972/otb#readme"
 
 HOVER_ROW_COLOR = QColor(0x88, 0x88, 0x88, 90)  # same mid-grey as button hover
@@ -648,6 +651,37 @@ def decode_move(board: chess.Board, entry: BookEntry) -> chess.Move | None:
             if alt in board.legal_moves:
                 return alt
     return None
+
+
+def _settings() -> QSettings:
+    return QSettings(APP_ORG, APP_NAME)
+
+
+def _default_book_path() -> str:
+    """book.bin in the per-user data folder, which is always writable (an
+    installed copy's own folder, e.g. under Program Files, is not):
+    Linux ~/.local/share/GambitGear/OTB, Windows %APPDATA%\\GambitGear\\OTB,
+    macOS ~/Library/Application Support/GambitGear/OTB."""
+    folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, "book.bin")
+
+
+def _migrate_old_settings() -> None:
+    """One-time copy of the settings stored under the app's former name
+    (ChessRepertoire/ChessRepertoireApp). Before the data folder existed,
+    the default book was ./book.bin -- keep using it if it is there, so an
+    existing book doesn't seem to vanish."""
+    new = _settings()
+    if new.value("migrated_old_settings", False, type=bool):
+        return
+    old = QSettings("ChessRepertoire", "ChessRepertoireApp")
+    for key in old.allKeys():
+        if not new.contains(key):
+            new.setValue(key, old.value(key))
+    if not new.contains("book_path") and os.path.exists("book.bin"):
+        new.setValue("book_path", os.path.abspath("book.bin"))
+    new.setValue("migrated_old_settings", True)
 
 
 def load_book(path: str) -> list[BookEntry]:
@@ -1503,12 +1537,11 @@ class MainWindow(QMainWindow):
         if book_path:
             self.book_path = book_path
         else:
-            settings = QSettings("ChessRepertoire", "ChessRepertoireApp")
-            stored_path = settings.value("book_path", type=str)
+            stored_path = _settings().value("book_path", type=str)
             if stored_path and os.path.exists(stored_path):
                 self.book_path = stored_path
             else:
-                self.book_path = "book.bin"
+                self.book_path = _default_book_path()
         self._transposition_cache: set[int] | None = None
         self._load_book(self.book_path)
         self.setWindowTitle("Opening Tree Builder")
@@ -1789,7 +1822,7 @@ class MainWindow(QMainWindow):
             self, "Select UCI engine executable", "", "All files (*)"
         )
         if path:
-            settings = QSettings("ChessRepertoire", "ChessRepertoireApp")
+            settings = _settings()
             settings.setValue("engine_path", path)
             if self.engine_active:
                 self._stop_engine()
@@ -1803,7 +1836,7 @@ class MainWindow(QMainWindow):
         if path:
             self.book_path = path
             self._load_book(path)
-            QSettings("ChessRepertoire", "ChessRepertoireApp").setValue("book_path", path)
+            _settings().setValue("book_path", path)
             self.refresh()
 
     def _import_pgn_dialog(self):
@@ -2013,7 +2046,7 @@ class MainWindow(QMainWindow):
 
     def _start_engine(self):
         if self.engine_worker is None:
-            settings = QSettings("ChessRepertoire", "ChessRepertoireApp")
+            settings = _settings()
             path = settings.value("engine_path", type=str)
 
             if not path or not os.path.exists(path):
@@ -2445,6 +2478,14 @@ class MainWindow(QMainWindow):
 def main():
     book_path = sys.argv[1] if len(sys.argv) > 1 else None
     app = QApplication(sys.argv)
+    app.setOrganizationName(APP_ORG)  # also selects the per-user data folder
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    # window/taskbar icon; shipped next to otb.py (PyInstaller: --add-data)
+    icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otb_icon.png")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+    _migrate_old_settings()
     window = MainWindow(book_path)
     window.show()
     sys.exit(app.exec())
