@@ -346,11 +346,17 @@ class ToggleSwitch(QAbstractButton):
     SYMBOL_OFF_COLOR = QColor("#999999")  # grey X
     SYMBOL_ON_COLOR = QColor("#4cd964")   # green check
 
+    # Emitted instead of toggling while the switch is unavailable. Not done
+    # via setEnabled(False): a disabled widget gets no clicks, so it could
+    # not explain why it can't be switched on.
+    unavailableClicked = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(58, 32)
+        self.unavailable = False
 
         self._knob_pos = 0.0  # 0.0 = left/off, 1.0 = right/on
         self._hovered = False
@@ -358,6 +364,25 @@ class ToggleSwitch(QAbstractButton):
         self._animation.setDuration(150)
         self._animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self.toggled.connect(self._animate_to_state)
+
+    def set_unavailable(self, unavailable: bool):
+        self.unavailable = unavailable
+        self.setCursor(Qt.CursorShape.ArrowCursor if unavailable else Qt.CursorShape.PointingHandCursor)
+        self.update()
+
+    def mousePressEvent(self, event):
+        if self.unavailable:
+            event.accept()  # swallow; the release reports it
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.unavailable:
+            if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+                self.unavailableClicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def _animate_to_state(self, checked: bool):
         self._animation.stop()
@@ -396,11 +421,14 @@ class ToggleSwitch(QAbstractButton):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self.unavailable:
+            painter.setOpacity(0.4)  # looks disabled, but still gets clicks/tooltips
 
         rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         radius = rect.height() / 2
 
-        track_off = self.TRACK_OFF_COLOR.darker(120) if self._hovered else self.TRACK_OFF_COLOR
+        hovered = self._hovered and not self.unavailable
+        track_off = self.TRACK_OFF_COLOR.darker(120) if hovered else self.TRACK_OFF_COLOR
         painter.setPen(self.BORDER_COLOR)
         painter.setBrush(self._blend(track_off, self.TRACK_ON_COLOR, self._knob_pos))
         painter.drawRoundedRect(rect, radius, radius)
@@ -1109,6 +1137,15 @@ class SeparatorFrame(QFrame):
         painter.end()
 
 
+def _draw_item_background(painter, opt: QStyleOptionViewItem):
+    """Plain selection background for our list delegates. Deliberately not
+    style.drawControl(CE_ItemViewItem): the Windows 11 style adds its own
+    decorations there (an accent-colored bar at the item's left edge, focus
+    markers) that don't fit the lists' look."""
+    if opt.state & QStyle.StateFlag.State_Selected:
+        painter.fillRect(opt.rect, opt.palette.color(QPalette.ColorRole.Highlight))
+
+
 def _draw_item_text(painter, opt: QStyleOptionViewItem, index, indent: int, text: str):
     """Draws an item's text left-aligned at `indent` px from the cell's left
     edge, in the item's foreground color (or the selected-text color)."""
@@ -1154,9 +1191,7 @@ class MoveItemDelegate(QStyledItemDelegate):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         text = opt.text
-        opt.text = ""  # style draws background/selection only; text comes last
-        style = opt.widget.style() if opt.widget else QApplication.style()
-        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        _draw_item_background(painter, opt)  # text comes last
         if index.data(self.TRANSPOSITION_ROLE):
             painter.fillRect(option.rect, TRANSPOSITION_ROW_COLOR)
         if item is not None and item is self.list_widget.hovered_item:
@@ -1274,11 +1309,16 @@ def _move_list_font(base: QFont) -> QFont:
 
 
 class SeparatorLineDelegate(QStyledItemDelegate):
-    """Default item painting plus the shared thin separator line below each
-    row (as in the move lists)."""
+    """Item painting for the Transpositions list like the move lists: plain
+    selection, grey hover, text and the shared thin line below each row."""
 
     def paint(self, painter, option, index):
-        super().paint(painter, option, index)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        _draw_item_background(painter, opt)
+        if getattr(opt.widget, "hovered_row", None) == index.row():
+            painter.fillRect(opt.rect, HOVER_ROW_COLOR)
+        _draw_item_text(painter, opt, index, 6, opt.text)
         painter.save()
         painter.setPen(_separator_color(option.widget, option))
         painter.drawLine(option.rect.bottomLeft(), option.rect.bottomRight())
@@ -1308,10 +1348,10 @@ class TranspositionsDialog(QDialog):
         self.list_widget.itemClicked.connect(
             lambda item: on_select(item.data(Qt.ItemDataRole.UserRole))
         )
-        c = HOVER_ROW_COLOR  # same grey as the main move list's hover
-        self.list_widget.setStyleSheet(
-            f"QListWidget::item:hover {{ background: rgba({c.red()}, {c.green()}, {c.blue()}, {c.alpha()}); }}"
-        )
+        # hover tracked by hand (painted by SeparatorLineDelegate), like the move lists
+        self.list_widget.hovered_row = None
+        self.list_widget.setMouseTracking(True)
+        self.list_widget.viewport().installEventFilter(self)
         self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._on_context_menu)
         self.list_widget.setItemDelegate(SeparatorLineDelegate(self.list_widget))
@@ -1339,13 +1379,27 @@ class TranspositionsDialog(QDialog):
         content_width = lw.sizeHintForColumn(0) + 2 * lw.frameWidth()
         content_width += lw.verticalScrollBar().sizeHint().width() + 40
         rows = max(lw.count(), 1)
-        # +1 row of slack: the hover stylesheet adds padding the size hint misses
+        # +1 row of slack, so the last row never needs a scroll bar
         list_height = (rows + 1) * lw.sizeHintForRow(0) + 2 * lw.frameWidth()
         content_height = list_height + self.sizeHint().height() - lw.sizeHint().height() + 8
         screen = self.screen().availableGeometry() if self.screen() else None
         max_width = int(screen.width() * 0.9) if screen else content_width
         max_height = int(screen.height() * 0.7) if screen else content_height
         self.resize(max(560, min(content_width, max_width)), max(300, min(content_height, max_height)))
+
+    def _set_hovered_row(self, row: int | None):
+        if row != self.list_widget.hovered_row:
+            self.list_widget.hovered_row = row
+            self.list_widget.viewport().update()
+
+    def eventFilter(self, obj, event):
+        if obj is self.list_widget.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                index = self.list_widget.indexAt(event.position().toPoint())
+                self._set_hovered_row(index.row() if index.isValid() else None)
+            elif event.type() == QEvent.Type.Leave:
+                self._set_hovered_row(None)
+        return super().eventFilter(obj, event)
 
     def _on_context_menu(self, pos):
         item = self.list_widget.itemAt(pos)
@@ -1413,9 +1467,7 @@ class LineMoveDelegate(QStyledItemDelegate):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         text = opt.text
-        opt.text = ""  # let the style draw background/selection only
-        style = opt.widget.style() if opt.widget else QApplication.style()
-        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        _draw_item_background(painter, opt)
         if getattr(opt.widget, "hovered_cell", None) == (index.row(), index.column()):
             painter.fillRect(option.rect, HOVER_ROW_COLOR)  # same grey as the book list's hover
 
@@ -1603,11 +1655,12 @@ class MainWindow(QMainWindow):
 
         for btn in (self.btn_start, self.btn_back, self.btn_forward, self.btn_end, self.btn_flip):
             btn.setStyleSheet(NAV_BUTTON_STYLE)
+            # no keyboard focus: avoids the dotted focus frame some styles
+            # (Windows) draw; the keys work through window-wide shortcuts
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         self.engine_label = QLabel()
-        self.engine_label.setToolTip("Engine")
         self.engine_toggle = ToggleSwitch()
-        self.engine_toggle.setToolTip("Engine (E)")
 
         self.mode_switch = ModeSwitch()
         self.mode_switch.setToolTip("View / Build mode")
@@ -1625,6 +1678,7 @@ class MainWindow(QMainWindow):
         self.btn_end.clicked.connect(self.goto_end)
         self.btn_flip.clicked.connect(self.board_widget.flip)
         self.engine_toggle.toggled.connect(self._on_engine_toggle_changed)
+        self.engine_toggle.unavailableClicked.connect(self._explain_no_engine)
         self.mode_switch.toggled.connect(lambda checked: self._set_mode("BUILD" if checked else "VIEW"))
 
         nav_grid = QGridLayout()
@@ -1706,13 +1760,17 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence(key), self, activated=slot)
         # f = flip board, e = engine on/off; Shift variants so caps lock /
         # uppercase works too
-        for letter, slot in (("F", self.board_widget.flip), ("E", self.engine_toggle.toggle)):
+        for letter, slot in (("F", self.board_widget.flip), ("E", self._on_engine_key)):
             for seq in (letter, f"Shift+{letter}"):
                 QShortcut(QKeySequence(seq), self, activated=slot)
 
         self._build_menu()
+        self._update_engine_availability()
         self.setStatusBar(QStatusBar())
         self.statusBar().setSizeGripEnabled(False)
+        # Windows styles frame every status bar section (vertical lines
+        # between eval, message and book path); the sections need none.
+        self.statusBar().setStyleSheet("QStatusBar::item { border: none; }")
         # showMessage() puts text in the *temporary* slot, which Qt clears
         # whenever a menu opens/closes (the menu pushes its own status tip).
         # A permanent widget is untouched by that, so the status text stays.
@@ -1817,6 +1875,42 @@ class MainWindow(QMainWindow):
         )
         box.exec()
 
+    NO_ENGINE_HINT = "Please select an engine first via File → Select Engine…"
+
+    @staticmethod
+    def _engine_path() -> str | None:
+        path = _settings().value("engine_path", type=str)
+        return path if path and os.path.exists(path) else None
+
+    def _update_engine_availability(self):
+        """Engine switch is unavailable (faded, explains itself) until a
+        valid engine executable has been selected, e.g. right after install."""
+        available = self._engine_path() is not None
+        self.engine_toggle.set_unavailable(not available)
+        tip = "Engine (E)" if available else self.NO_ENGINE_HINT
+        self.engine_toggle.setToolTip(tip)
+        self.engine_label.setToolTip(tip)
+
+    def _on_engine_key(self):
+        if self.engine_toggle.unavailable:
+            self._explain_no_engine()
+        else:
+            self.engine_toggle.toggle()
+
+    def _explain_no_engine(self):
+        box = QMessageBox(self)
+        box.setWindowTitle(" ")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(self.NO_ENGINE_HINT)
+        box.setInformativeText(
+            "OTB works with any UCI chess engine, e.g. Stockfish (free, stockfishchess.org)."
+        )
+        select_button = box.addButton("Select Engine…", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Close)
+        box.exec()
+        if box.clickedButton() is select_button:
+            self._select_engine_dialog()
+
     def _select_engine_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select UCI engine executable", "", "All files (*)"
@@ -1824,6 +1918,7 @@ class MainWindow(QMainWindow):
         if path:
             settings = _settings()
             settings.setValue("engine_path", path)
+            self._update_engine_availability()
             if self.engine_active:
                 self._stop_engine()
                 self.engine_worker = None
@@ -2057,6 +2152,7 @@ class MainWindow(QMainWindow):
                     self._sync_engine_toggle()  # user cancelled: uncheck again
                     return
                 settings.setValue("engine_path", path)
+                self._update_engine_availability()
 
             self.engine_worker = EngineWorker(path)
             self.engine_worker.best_move_found.connect(self._on_engine_best_move)
