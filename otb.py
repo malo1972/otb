@@ -22,6 +22,7 @@ import base64
 import os
 import re
 import struct
+import subprocess
 import sys
 import threading
 from collections import deque
@@ -798,7 +799,11 @@ class EngineWorker(QObject):
     def _run(self, board: chess.Board):
         try:
             if self._engine is None:
-                self._engine = chess.engine.SimpleEngine.popen_uci(self.engine_path)
+                # Windows: the engine is a console program; without this flag
+                # it opens its own console window next to OTB (a --windowed
+                # app has no console to share). No-op elsewhere.
+                popen_args = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+                self._engine = chess.engine.SimpleEngine.popen_uci(self.engine_path, **popen_args)
                 self._engine.configure({"Threads": self.THREADS, "Hash": self.HASH_MB})
             limit = chess.engine.Limit(time=self.ANALYSIS_TIME_LIMIT)
             with self._engine.analysis(board, limit) as analysis:
