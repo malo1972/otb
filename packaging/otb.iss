@@ -3,7 +3,9 @@
 ; Expects the PyInstaller output in dist\OTB (OTB.exe + _internal\) and is
 ; normally run by .github/workflows/windows-installer.yml:
 ;   iscc /DAppVersion=1.0 packaging\otb.iss
-; The result is packaging\Output\OTB-Setup-<version>.exe.
+; The result is packaging\Output\OTB-Setup.exe. The file name carries no
+; version, so that .../releases/latest/download/OTB-Setup.exe always points
+; to the newest release.
 
 #ifndef AppVersion
   #define AppVersion "0.0-dev"
@@ -33,7 +35,7 @@ DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE.txt
 SourceDir=.
 OutputDir=Output
-OutputBaseFilename=OTB-Setup-{#AppVersion}
+OutputBaseFilename=OTB-Setup
 UninstallDisplayIcon={app}\{#AppExe}
 SetupIconFile=otb.ico
 Compression=lzma2/max

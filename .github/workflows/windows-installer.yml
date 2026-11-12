@@ -1,7 +1,9 @@
 # Builds the Windows installer (PyInstaller + Inno Setup).
 #
-# - Push a tag like v1.0  -> builds OTB-Setup-1.0.exe and publishes it as a
+# - Push a tag like v1.0  -> builds OTB-Setup.exe and publishes it as a
 #                            GitHub Release (the tag must match APP_VERSION).
+#                            The file name has no version, so the link
+#                            releases/latest/download/OTB-Setup.exe stays valid.
 # - "Run workflow" button -> test build only, installer downloadable from the
 #   (Actions tab)             run's artifacts; no release is created.
 name: Windows installer
@@ -64,12 +66,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: OTB-Setup-${{ steps.version.outputs.version }}
-          path: packaging/Output/OTB-Setup-*.exe
+          path: packaging/Output/OTB-Setup.exe
 
       - name: Publish GitHub Release
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           name: OTB ${{ steps.version.outputs.version }}
-          files: packaging/Output/OTB-Setup-*.exe
+          files: packaging/Output/OTB-Setup.exe
           generate_release_notes: true
