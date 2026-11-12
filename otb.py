@@ -119,7 +119,10 @@ DEFAULT_PLAY_SPEED = "Medium"
 # View > Coordinates: setting value -> menu text
 COORDINATE_MODES = {"inside": "Inside Squares", "outside": "Outside", "off": "Off"}
 DEFAULT_COORDINATES = "off"
-PIECE_ANIMATION_MS = 250  # how long a piece glides to its square; Lichess' "normal" animation speed
+# How long a piece glides to its square, for each View > Animation Speed
+# setting; the same as Lichess' slow / normal / fast.
+ANIMATION_SPEEDS_MS = {"Slow": 500, "Medium": 250, "Fast": 120}
+DEFAULT_ANIMATION_SPEED = "Medium"
 RIGHT_PANEL_WIDTH = 280  # constant width for the nav+list panel
 LINE_PANEL_WIDTH = RIGHT_PANEL_WIDTH  # current-line score sheet + nav buttons, same width as the right panel
 DRAG_THRESHOLD = 6  # px of mouse movement before a press counts as a drag
@@ -957,7 +960,7 @@ class BoardWidget(QWidget):
         self._animation = QVariantAnimation(self)
         self._animation.setStartValue(0.0)
         self._animation.setEndValue(1.0)
-        self._animation.setDuration(PIECE_ANIMATION_MS)
+        self._animation.setDuration(ANIMATION_SPEEDS_MS[DEFAULT_ANIMATION_SPEED])
         self._animation.setEasingCurve(QEasingCurve.Type.InOutCubic)  # as Lichess (chessground)
         self._animation.valueChanged.connect(self._on_glide_step)
         self._animation.finished.connect(self._end_glide)
@@ -1034,6 +1037,9 @@ class BoardWidget(QWidget):
         col, row = (file, 7 - rank) if self.orientation == chess.WHITE else (7 - file, rank)
         return QRectF(rect.left() + col * size, rect.top() + row * size, size, size)
 
+    def set_animation_speed(self, speed: str):
+        self._animation.setDuration(ANIMATION_SPEEDS_MS[speed])
+
     def set_coordinates(self, mode: str):
         self.coordinates = mode
         self.update()
@@ -1043,14 +1049,20 @@ class BoardWidget(QWidget):
         coordinates in "outside" mode."""
         if self.coordinates != "outside":
             return 0.0
-        return max(14.0, min(self.width(), self.height()) * 0.04)
+        ratio = self.devicePixelRatioF()
+        return round(max(14.0, min(self.width(), self.height()) * 0.04) * ratio) / ratio  # whole pixels
 
     def board_rect(self) -> QRectF:
-        """The area covered by the 64 squares."""
+        """The area covered by the 64 squares. Its side is a multiple of 8
+        screen pixels, so every square edge falls exactly between two pixels:
+        on a half-covered pixel the renderer blends in the dark background,
+        which shows as dark lines between the squares, most of all around a
+        highlighted one."""
         w = float(self.width())
         h = float(self.height())
         margin = self._coordinate_margin()
-        side = min(w, h) - margin
+        ratio = self.devicePixelRatioF()
+        side = math.floor((min(w, h) - margin) * ratio / 8) * 8 / ratio
         return QRectF(margin, 0.0, side, side)
 
     def _paint_engine_arrow(self, painter: QPainter):
@@ -2497,6 +2509,19 @@ class MainWindow(QMainWindow):
             action.triggered.connect(lambda _checked, speed=speed: self._set_play_speed(speed))
             speed_group.addAction(action)
 
+        animation_menu = view_menu.addMenu("Animation Speed")
+        animation_group = QActionGroup(self)
+        current = _settings().value("animation_speed", DEFAULT_ANIMATION_SPEED, type=str)
+        if current not in ANIMATION_SPEEDS_MS:
+            current = DEFAULT_ANIMATION_SPEED
+        self.board_widget.set_animation_speed(current)
+        for speed in ANIMATION_SPEEDS_MS:
+            action = animation_menu.addAction(speed)
+            action.setCheckable(True)
+            action.setChecked(speed == current)
+            action.triggered.connect(lambda _checked, speed=speed: self._set_animation_speed(speed))
+            animation_group.addAction(action)
+
         coordinates_menu = view_menu.addMenu("Coordinates")
         coordinates_group = QActionGroup(self)
         current = _settings().value("coordinates", DEFAULT_COORDINATES, type=str)
@@ -3295,6 +3320,10 @@ class MainWindow(QMainWindow):
         elif chosen == copy_pgn_action:
             # '*' = PGN result terminator (unknown), as in the Transpositions dialog
             QApplication.clipboard().setText(f"{chess.Board().variation_san(moves)} *\n")
+
+    def _set_animation_speed(self, speed: str):
+        self.board_widget.set_animation_speed(speed)
+        _settings().setValue("animation_speed", speed)
 
     def _set_coordinates(self, mode: str):
         self.board_widget.set_coordinates(mode)
