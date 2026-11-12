@@ -74,6 +74,7 @@ from PyQt6.QtWidgets import (
     QAbstractScrollArea,
     QAbstractItemView,
     QApplication,
+    QComboBox,
     QFrame,
     QDialog,
     QDialogButtonBox,
@@ -91,6 +92,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QRadioButton,
     QSizePolicy,
     QStatusBar,
     QStyle,
@@ -713,28 +715,93 @@ def _migrate_old_settings() -> None:
     new.setValue("migrated_old_settings", True)
 
 
-def load_book(path: str) -> list[BookEntry]:
+# The Polyglot format has no header, so the repertoire color is stored in a
+# marker entry with key 0. Engines and GUIs look entries up by the hash of a
+# real position, which is never 0, so they ignore it; sorted by key it is the
+# first entry of the file. Its weight field holds the color, its learn field
+# a magic value telling it apart from other tools' key-0 entries.
+COLOR_MARKER_MAGIC = 0x4F544231  # "OTB1"
+BOOK_COLORS = {1: "White", 2: "Black", 3: "Both"}  # marker weight -> color
+BOOK_COLOR_PREFIXES = {"White": "W_", "Black": "B_", "Both": "WB_"}  # file name prefix of new books
+
+
+def load_book(path: str) -> tuple[list[BookEntry], str | None]:
+    """Returns the entries and the repertoire color ("White", "Black",
+    "Both"), or None if the book has no color marker."""
     entries: list[BookEntry] = []
+    color = None
     try:
         with open(path, "rb") as f:
             data = f.read()
     except FileNotFoundError:
-        return entries
+        return entries, color
     for offset in range(0, len(data) - 15, 16):
         key, mv, weight, learn = struct.unpack_from(">QHHI", data, offset)
+        if key == 0 and learn == COLOR_MARKER_MAGIC:
+            color = BOOK_COLORS.get(weight)
+            continue
         to_sq = mv & 0x3F
         from_sq = (mv >> 6) & 0x3F
         promo = (mv >> 12) & 0x7
         entries.append(BookEntry(key, from_sq, to_sq, promo, weight, learn))
-    return entries
+    return entries, color
 
 
-def save_book(path: str, entries: list[BookEntry]) -> None:
+def _pack_entry(e: BookEntry) -> bytes:
+    return struct.pack(">QHHI", e.key, (e.promotion << 12) | (e.from_square << 6) | e.to_square, e.weight, e.learn)
+
+
+def save_book(path: str, entries: list[BookEntry], color: str | None = None) -> None:
     ordered = sorted(entries, key=lambda e: e.key)
+    marker = b""
+    if color is not None:
+        weight = next(w for w, name in BOOK_COLORS.items() if name == color)
+        marker = struct.pack(">QHHI", 0, 0, weight, COLOR_MARKER_MAGIC)
+    data = marker + b"".join(map(_pack_entry, ordered))
     with open(path, "wb") as f:
-        for e in ordered:
-            mv = (e.promotion << 12) | (e.from_square << 6) | e.to_square
-            f.write(struct.pack(">QHHI", e.key, mv, e.weight, e.learn))
+        f.write(data)
+
+
+def patch_book(path: str, entry: BookEntry, is_new: bool, records_before: int) -> bool:
+    """Writes one new entry or one changed weight into the book file without
+    re-packing the whole book, leaving the file exactly as save_book would.
+    records_before is the number of 16-byte records the file must hold; if
+    it doesn't, or the file isn't sorted as expected, nothing is written and
+    False is returned -- the caller then falls back to save_book."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return False
+    if len(data) != records_before * 16:
+        return False
+
+    def key_at(i: int) -> int:
+        return struct.unpack_from(">Q", data, i * 16)[0]
+
+    def bisect(after_equal: bool) -> int:
+        lo, hi = 0, records_before
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if key_at(mid) < entry.key or (after_equal and key_at(mid) == entry.key):
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo
+
+    record = _pack_entry(entry)
+    end = bisect(after_equal=True)  # a stable sort puts a new entry last among its key
+    if is_new:
+        with open(path, "wb") as f:
+            f.write(data[:end * 16] + record + data[end * 16:])
+        return True
+    for i in range(bisect(after_equal=False), end):
+        if data[i * 16:i * 16 + 10] == record[:10]:  # same key and move
+            with open(path, "r+b") as f:
+                f.seek(i * 16)
+                f.write(record)
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -855,10 +922,14 @@ class BoardWidget(QWidget):
         self.redraw()
 
     def set_hover_arrow(self, arrow: tuple[int, int] | None):
+        if arrow == self.hover_arrow:
+            return
         self.hover_arrow = arrow
         self.redraw()
 
     def set_engine_arrow(self, arrow: tuple[int, int] | None):
+        if arrow == self.engine_arrow:
+            return
         self.engine_arrow = arrow
         self.redraw()
 
@@ -1332,10 +1403,18 @@ class SeparatorLineDelegate(QStyledItemDelegate):
 
 class TranspositionsDialog(QDialog):
     """Lists every move order from the starting position to a transposition,
-    one PGN movetext line per row. Left-click loads a line via
-    on_select(moves), right-click copies its PGN."""
+    one PGN movetext line per row. Left-click or the up/down keys load a
+    line via on_select(moves), right-click copies its PGN. current: the move
+    order that is on the board right now, shown selected if it is listed."""
 
-    def __init__(self, lines: list[tuple[str, list[chess.Move]]], truncated: bool, on_select, parent=None):
+    def __init__(
+        self,
+        lines: list[tuple[str, list[chess.Move]]],
+        truncated: bool,
+        on_select,
+        parent=None,
+        current: list[chess.Move] | None = None,
+    ):
         super().__init__(parent)
         # No window title: the window manager decides its alignment (GNOME
         # centers it), so a left-aligned heading is shown inside instead.
@@ -1353,6 +1432,21 @@ class TranspositionsDialog(QDialog):
         self.list_widget.itemClicked.connect(
             lambda item: on_select(item.data(Qt.ItemDataRole.UserRole))
         )
+
+        # Keyboard only (see eventFilter): a click is handled above, and
+        # neither a right-click nor the list getting the focus -- both move
+        # the current row as well -- may load a line.
+        self._key_navigation = False
+
+        def on_current_changed(item, _previous):
+            if item is not None and self._key_navigation:
+                on_select(item.data(Qt.ItemDataRole.UserRole))
+
+        self.list_widget.currentItemChanged.connect(on_current_changed)
+        self.list_widget.installEventFilter(self)
+        for row, (_pgn, moves) in enumerate(lines):
+            if moves == current:
+                self.list_widget.setCurrentRow(row)
         # hover tracked by hand (painted by SeparatorLineDelegate), like the move lists
         self.list_widget.hovered_row = None
         self.list_widget.setMouseTracking(True)
@@ -1371,11 +1465,14 @@ class TranspositionsDialog(QDialog):
         caption = f"{len(lines)} move orders lead to the subsequent position"
         if truncated:
             caption += f" (only the first {len(lines)} shown)"
-        layout.addWidget(QLabel(caption + ".\nLeft-click a line to load it, right-click to copy the PGN."))
+        layout.addWidget(QLabel(
+            caption + ".\nLeft-click a line or use the arrow keys to load it, right-click to copy the PGN."
+        ))
         layout.addWidget(SeparatorFrame(self.list_widget))  # same outer frame as the move lists
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.list_widget.setFocus()  # arrow keys work right away
 
         # Big enough for the longest line and all lines (plus margins, a
         # scrollbar and the heading/buttons), capped at 90% of the screen
@@ -1398,6 +1495,15 @@ class TranspositionsDialog(QDialog):
             self.list_widget.viewport().update()
 
     def eventFilter(self, obj, event):
+        if obj is self.list_widget:
+            if event.type() == QEvent.Type.KeyPress:
+                self._key_navigation = True
+                if event.key() == Qt.Key.Key_Down and not self.list_widget.selectedItems():
+                    self.list_widget.setCurrentRow(-1)  # nothing selected yet: start at the first line
+                    self.list_widget.setCurrentRow(0)
+                    return True
+            elif event.type() in (QEvent.Type.KeyRelease, QEvent.Type.FocusIn, QEvent.Type.FocusOut):
+                self._key_navigation = False
         if obj is self.list_widget.viewport():
             if event.type() == QEvent.Type.MouseMove:
                 index = self.list_widget.indexAt(event.position().toPoint())
@@ -1458,6 +1564,195 @@ class FenSearchDialog(QDialog):
         fen = self.fen_edit.text().strip()
         if fen:
             self.result_label.setText(self.search(fen))
+
+
+_PLAYER_TAG = re.compile(r'^\[(White|Black)\s+"(.*)"\]\s*$')
+
+
+def scan_pgn_players(path: str) -> dict[str, list[int]]:
+    """Player name -> [games as White, games as Black] for a PGN file. Reads
+    only the tag lines, so it is much faster than parsing the games."""
+    players: dict[str, list[int]] = {}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.startswith(("[White ", "[Black ")):
+                continue
+            match = _PLAYER_TAG.match(line)
+            if match is None:
+                continue
+            name = match.group(2).replace('\\"', '"').replace("\\\\", "\\")  # as python-chess reads it
+            players.setdefault(name, [0, 0])[match.group(1) == "Black"] += 1
+    return players
+
+
+class NewBookDialog(QDialog):
+    """Asks for the name and the repertoire color of a new book. The color
+    is mandatory and also shows in the file name as a W_, B_ or WB_ prefix.
+    color: preset that can't be changed (the caller needs that color)."""
+
+    def __init__(self, folder: str, color: str | None = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(" ")
+        self.setMinimumWidth(460)
+        self.folder = folder
+
+        heading = QLabel("New Book")
+        heading_font = heading.font()
+        heading_font.setBold(True)
+        heading_font.setPointSizeF(heading_font.pointSizeF() * 1.4)
+        heading.setFont(heading_font)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("Name, e.g. sicilian")
+        self.name_edit.textChanged.connect(self._update)
+
+        self.color_buttons = {name: QRadioButton(name) for name in BOOK_COLORS.values()}
+        color_row = QHBoxLayout()
+        color_row.addWidget(QLabel("Repertoire for:"))
+        for name, button in self.color_buttons.items():
+            button.setChecked(name == color)
+            button.setEnabled(color is None)
+            button.toggled.connect(self._update)
+            color_row.addWidget(button)
+        color_row.addStretch(1)
+
+        self.path_label = QLabel()
+        self.path_label.setWordWrap(True)
+        self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        folder_button = QPushButton("Folder…")
+        folder_button.setAutoDefault(False)
+        folder_button.clicked.connect(self._choose_folder)
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.path_label, 1)
+        path_row.addWidget(folder_button)
+
+        buttons = QDialogButtonBox()
+        self.create_button = buttons.addButton("Create", QDialogButtonBox.ButtonRole.AcceptRole)
+        self.create_button.setDefault(True)
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(heading)
+        layout.addWidget(self.name_edit)
+        layout.addLayout(color_row)
+        layout.addLayout(path_row)
+        layout.addWidget(buttons)
+        self._update()
+
+    def color(self) -> str | None:
+        return next((name for name, button in self.color_buttons.items() if button.isChecked()), None)
+
+    def path(self) -> str | None:
+        """Full path of the book file, or None while name or color is missing
+        or the name can't be a file name."""
+        name = self.name_edit.text().strip()
+        if name.lower().endswith(".bin"):
+            name = name[:-4].strip()
+        color = self.color()
+        if not name or color is None or re.search(r'[\\/:*?"<>|]', name):
+            return None
+        prefix = BOOK_COLOR_PREFIXES[color]
+        if not name.upper().startswith(prefix):  # typed with the prefix already
+            name = prefix + name
+        return os.path.join(self.folder, name + ".bin")
+
+    def _choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Folder for the new book", self.folder)
+        if folder:
+            self.folder = folder
+            self._update()
+
+    def _update(self):
+        path = self.path()
+        self.create_button.setEnabled(path is not None)
+        if path is not None:
+            self.path_label.setText(f"File: {path}")
+        elif self.color() is None:
+            self.path_label.setText("Enter a name and choose a color.")
+        else:
+            self.path_label.setText("Enter a name (without / \\ : * ? \" < > |).")
+
+
+class ImportPgnDialog(QDialog):
+    """Chooses which games of a PGN file to import: all of them, or only the
+    games the ticked players had White / Black / either color in."""
+
+    def __init__(self, players: dict[str, list[int]], book_color: str | None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(" ")
+        self.resize(460, 520)
+
+        heading = QLabel("Import PGN")
+        heading_font = heading.font()
+        heading_font.setBold(True)
+        heading_font.setPointSizeF(heading_font.pointSizeF() * 1.4)
+        heading.setFont(heading_font)
+
+        caption = QLabel(
+            "Tick players to import only their games.\n"
+            "With no player ticked, all games are imported."
+        )
+
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Search player…")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.textChanged.connect(self._apply_filter)
+
+        self.player_list = QListWidget()
+        by_games = sorted(players.items(), key=lambda item: (-sum(item[1]), item[0]))
+        for name, (as_white, as_black) in by_games:
+            item = QListWidgetItem(f"{name}   ({as_white} White, {as_black} Black)")
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            self.player_list.addItem(item)
+        self.player_list.itemChanged.connect(self._update_color_enabled)
+
+        self.color_label = QLabel("Import the games they played as:")
+        self.color_combo = QComboBox()
+        self.color_combo.addItems(BOOK_COLORS.values())
+        self.color_combo.setCurrentText(book_color or "Both")
+        color_row = QHBoxLayout()
+        color_row.addWidget(self.color_label)
+        color_row.addWidget(self.color_combo)
+        color_row.addStretch(1)
+
+        buttons = QDialogButtonBox()
+        import_button = buttons.addButton("Import", QDialogButtonBox.ButtonRole.AcceptRole)
+        import_button.setDefault(True)
+        buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(heading)
+        layout.addWidget(caption)
+        layout.addWidget(self.filter_edit)
+        layout.addWidget(self.player_list, 1)
+        layout.addLayout(color_row)
+        layout.addWidget(buttons)
+        self._update_color_enabled()
+
+    def _apply_filter(self, text: str):
+        needle = text.strip().lower()
+        for row in range(self.player_list.count()):
+            item = self.player_list.item(row)
+            item.setHidden(needle not in item.data(Qt.ItemDataRole.UserRole).lower())
+
+    def _update_color_enabled(self):
+        enabled = bool(self.players())  # the color only matters with a player filter
+        self.color_label.setEnabled(enabled)
+        self.color_combo.setEnabled(enabled)
+
+    def players(self) -> set[str]:
+        """The ticked players; empty = import all games."""
+        items = (self.player_list.item(row) for row in range(self.player_list.count()))
+        return {item.data(Qt.ItemDataRole.UserRole) for item in items if item.checkState() == Qt.CheckState.Checked}
+
+    def color(self) -> str:
+        return self.color_combo.currentText()
 
 
 class LineMoveDelegate(QStyledItemDelegate):
@@ -1600,6 +1895,7 @@ class MainWindow(QMainWindow):
             else:
                 self.book_path = _default_book_path()
         self._transposition_cache: set[int] | None = None
+        self._key_index: dict[int, list[BookEntry]] | None = None  # see _index_entries_by_key
         self._load_book(self.book_path)
         self.setWindowTitle("Opening Tree Builder")
 
@@ -1802,7 +2098,18 @@ class MainWindow(QMainWindow):
         size_grip = ManualSizeGrip(self)
         self.statusBar().addPermanentWidget(size_grip)
 
+        self._orient_board_to_book()
         self.refresh()
+        size = _settings().value("window_size")  # as it was when OTB was last closed
+        if isinstance(size, QSize) and size.isValid():
+            self.resize(size)
+
+    def _orient_board_to_book(self):
+        """Puts the book's repertoire color at the bottom. Books for both
+        colors or without a color marker leave the board as it is."""
+        if self.book_color in ("White", "Black"):
+            self.board_widget.orientation = chess.WHITE if self.book_color == "White" else chess.BLACK
+            self.board_widget.redraw()
 
     def _set_mode(self, mode: str):
         if mode == self.mode:
@@ -1820,9 +2127,17 @@ class MainWindow(QMainWindow):
         self.import_pgn_action.setEnabled(self.mode == "BUILD")  # View mode: read-only
         file_menu.addAction(self.import_pgn_action)
 
+        new_action = QAction("New Book…", self)
+        new_action.triggered.connect(lambda: self._new_book_dialog())
+        file_menu.addAction(new_action)
+
         open_action = QAction("Open Book…", self)
         open_action.triggered.connect(self._open_book_dialog)
         file_menu.addAction(open_action)
+
+        book_color_action = QAction("Book Color…", self)
+        book_color_action.triggered.connect(self._book_color_dialog)
+        file_menu.addAction(book_color_action)
 
         select_engine_action = QAction("Select Engine…", self)
         select_engine_action.triggered.connect(self._select_engine_dialog)
@@ -1940,7 +2255,97 @@ class MainWindow(QMainWindow):
             self.book_path = path
             self._load_book(path)
             _settings().setValue("book_path", path)
+            self._orient_board_to_book()
             self.refresh()
+            if self.book_color is None:
+                self._book_color_dialog()
+
+    def _book_color_dialog(self):
+        """Asks which side the book is a repertoire for and stores the answer
+        in the book file (see COLOR_MARKER_MAGIC)."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Book Color")
+        box.setIcon(QMessageBox.Icon.Question)
+        if self.book_color is None:
+            box.setText("This book has no repertoire color yet.")
+        else:
+            box.setText(f"This book is marked as a {self.book_color} repertoire.")
+        box.setInformativeText(
+            "Is it a repertoire for White, for Black or for both colors?\n"
+            "The answer is saved as a marker in the book file."
+        )
+        buttons = {box.addButton(name, QMessageBox.ButtonRole.AcceptRole): name for name in BOOK_COLORS.values()}
+        box.addButton("Not now", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        color = buttons.get(box.clickedButton())
+        if color is None or color == self.book_color:
+            return
+        try:
+            save_book(self.book_path, self.book_entries, color)
+        except OSError as error:
+            QMessageBox.warning(self, "Book Color", f"Could not write {self.book_path}:\n{error}")
+            return
+        self.book_color = color
+        self._orient_board_to_book()
+        self._update_status()
+
+    def _new_book_dialog(self, color: str | None = None) -> bool:
+        """Creates an empty book and makes it the current one. color: the
+        book must have this color (not offered for choice). Returns False if
+        cancelled."""
+        dialog = NewBookDialog(os.path.dirname(self.book_path), color, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False
+        path, color = dialog.path(), dialog.color()
+        if os.path.exists(path):
+            reply = QMessageBox.question(
+                self,
+                "New Book",
+                f"{os.path.basename(path)} already exists.\nReplace it with an empty book?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return False
+        try:
+            save_book(path, [], color)
+        except OSError as error:
+            QMessageBox.warning(self, "New Book", f"Could not create {path}:\n{error}")
+            return False
+        self.book_path = path
+        self.book_entries = []
+        self._key_index = None
+        self.book_color = color
+        self._transposition_cache = None
+        _settings().setValue("book_path", path)
+        self._orient_board_to_book()
+        self._load_line([])  # an empty book starts from the initial position
+        return True
+
+    def _confirm_color_mismatch(self, color: str) -> bool:
+        """The book is a one-color repertoire and the import would add games
+        of another color: offers a new book for them instead. Returns False
+        if the import is to be dropped."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Import PGN")
+        box.setIcon(QMessageBox.Icon.Warning)
+        games = "games of both colors" if color == "Both" else f"{color} games"
+        box.setText(f"This is a {self.book_color} book.")
+        box.setInformativeText(
+            f"Importing {games} mixes both colors in one book.\n"
+            f"Create a new {color} book for them instead?"
+        )
+        new_button = box.addButton("Create new book…", QMessageBox.ButtonRole.AcceptRole)
+        anyway_button = box.addButton("Import anyway", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(new_button)
+        box.exec()
+        if box.clickedButton() == new_button:
+            return self._new_book_dialog(color)
+        if box.clickedButton() == anyway_button:
+            self.book_color = "Both"  # written with the import; keeps the marker truthful
+            return True
+        return False
 
     def _import_pgn_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1948,6 +2353,17 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        try:
+            dialog = ImportPgnDialog(scan_pgn_players(path), self.book_color, self)
+        except OSError as error:
+            QMessageBox.warning(self, "Import failed", str(error))
+            return
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        players, color = dialog.players(), dialog.color()
+        if players and self.book_color in ("White", "Black") and color != self.book_color:
+            if not self._confirm_color_mismatch(color):
+                return
 
         progress = self._make_progress("Importing PGN…", cancellable=True)
 
@@ -1958,7 +2374,7 @@ class MainWindow(QMainWindow):
             return not progress.wasCanceled()
 
         try:
-            result = self._import_pgn_file(path, report)
+            result = self._import_pgn_file(path, report, players, color)
         except Exception as exc:  # noqa: BLE001
             progress.close()
             self._load_book(self.book_path)  # drop the partial in-memory import
@@ -1968,7 +2384,7 @@ class MainWindow(QMainWindow):
             progress.close()
             self._load_book(self.book_path)
             return
-        game_count, move_count = result
+        imported, game_count, move_count = result
         progress.setLabelText("Updating view…")
         QApplication.processEvents()
         self.refresh()
@@ -1976,29 +2392,51 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "Import complete",
-            f"Imported {game_count} game(s) from the PGN file, "
+            f"Imported {imported} of {game_count} game(s) from the PGN file, "
             f"adding/updating {move_count} move(s) in the book.",
         )
 
-    def _import_pgn_file(self, path: str, report=None) -> tuple[int, int] | None:
-        """report(fraction_done, game_count) -> keep_going is called every
+    def _import_pgn_file(
+        self, path: str, report=None, players: set[str] | None = None, color: str = "Both"
+    ) -> tuple[int, int, int] | None:
+        """Returns (games imported, games in the file, moves added/updated).
+
+        players: if given and not empty, only games in which one of them
+        had `color` ("White", "Black", "Both" = either) are imported.
+        report(fraction_done, game_count) -> keep_going is called every
         few games; returns None (book left unsaved) if it asks to stop."""
+        def wanted(headers) -> bool:
+            return (color != "Black" and headers.get("White") in players) or (
+                color != "White" and headers.get("Black") in players)
+
+        imported = 0
         game_count = 0
         move_count = 0
         total_size = os.path.getsize(path) or 1
         index = {(e.key, e.from_square, e.to_square, e.promotion): e for e in self.book_entries}
         with open(path, encoding="utf-8", errors="replace") as f:
             while True:
+                if report is not None and game_count % 20 == 0 and game_count:
+                    if not report(min(f.tell() / total_size, 1.0), game_count):
+                        return None
+                if players:
+                    # headers first: skipping a game is much cheaper than parsing it
+                    offset = f.tell()
+                    headers = chess.pgn.read_headers(f)
+                    if headers is None:
+                        break
+                    if not wanted(headers):
+                        game_count += 1
+                        continue
+                    f.seek(offset)
                 game = chess.pgn.read_game(f)
                 if game is None:
                     break
                 game_count += 1
+                imported += 1
                 move_count += self._import_game_tree(game, game.board(), index)
-                if report is not None and game_count % 20 == 0:
-                    if not report(min(f.tell() / total_size, 1.0), game_count):
-                        return None
-        save_book(self.book_path, self.book_entries)
-        return game_count, move_count
+        save_book(self.book_path, self.book_entries, self.book_color)
+        return imported, game_count, move_count
 
     def _make_progress(self, label: str, cancellable: bool) -> QProgressDialog:
         """Window-modal progress dialog: keeps the UI responsive (no "not
@@ -2018,7 +2456,8 @@ class MainWindow(QMainWindow):
             progress.setValue(int(fraction * 1000))
             QApplication.processEvents()
 
-        self.book_entries = load_book(path)
+        self.book_entries, self.book_color = load_book(path)
+        self._key_index = None
         self._backfill_resulting_keys(report)
         self._transposition_cache = None
         progress.close()
@@ -2195,6 +2634,8 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "Engine error", message)
 
     def closeEvent(self, event):
+        if not (self.isMaximized() or self.isFullScreen()):
+            _settings().setValue("window_size", self.size())
         if self.engine_worker is not None:
             self.engine_worker.quit_engine()
         super().closeEvent(event)
@@ -2218,18 +2659,18 @@ class MainWindow(QMainWindow):
         index: dict[tuple[int, int, int, int], BookEntry] | None = None,
     ):
         """index: optional (key, from, to, promo) -> entry lookup for bulk
-        imports; without it every call scans the whole book, which makes
-        importing a big PGN quadratic."""
+        imports, which saves building the per-move candidate list."""
         key = chess.polyglot.zobrist_hash(board_before)
         from_sq, to_sq, promo = encode_move(board_before, move)
         if index is not None:
             existing = index.get((key, from_sq, to_sq, promo))
         else:
             existing = next(
-                (e for e in self.book_entries
-                 if e.key == key and e.from_square == from_sq and e.to_square == to_sq and e.promotion == promo),
+                (e for e in self._index_entries_by_key().get(key, [])
+                 if e.from_square == from_sq and e.to_square == to_sq and e.promotion == promo),
                 None,
             )
+        records_before = len(self.book_entries) + (self.book_color is not None)
         if existing is not None:
             existing.weight = min(existing.weight + 1, 0xFFFF)  # polyglot weight is 16-bit
         else:
@@ -2239,15 +2680,19 @@ class MainWindow(QMainWindow):
             board_before.pop()
             entry = BookEntry(key, from_sq, to_sq, promo, 1, 0, resulting_key)
             self.book_entries.append(entry)
+            if self._key_index is not None:
+                self._key_index.setdefault(key, []).append(entry)
             if index is not None:
                 index[(key, from_sq, to_sq, promo)] = entry
-            self._transposition_cache = None  # graph structure changed
-        if save:
-            save_book(self.book_path, self.book_entries)
+                self._transposition_cache = None  # bulk import: recompute once afterwards
+            else:
+                self._add_to_transposition_cache(entry)
+        if save and not patch_book(self.book_path, existing or entry, existing is None, records_before):
+            save_book(self.book_path, self.book_entries, self.book_color)
 
     def _current_entries(self) -> list[BookEntry]:
         key = chess.polyglot.zobrist_hash(self.board)
-        return [e for e in self.book_entries if e.key == key]
+        return list(self._index_entries_by_key().get(key, []))
 
     def _on_item_clicked(self, item: QListWidgetItem):
         entry: BookEntry = item.data(Qt.ItemDataRole.UserRole)
@@ -2264,10 +2709,15 @@ class MainWindow(QMainWindow):
         self.board_widget.set_hover_arrow((move.from_square, move.to_square) if move is not None else None)
 
     def _index_entries_by_key(self) -> dict[int, list[BookEntry]]:
-        index: dict[int, list[BookEntry]] = {}
-        for e in self.book_entries:
-            index.setdefault(e.key, []).append(e)
-        return index
+        """Position key -> its entries. Built once and kept, so looking up a
+        position doesn't scan the whole book; whoever replaces book_entries
+        resets _key_index, appending an entry updates it in place."""
+        if self._key_index is None:
+            index: dict[int, list[BookEntry]] = {}
+            for e in self.book_entries:
+                index.setdefault(e.key, []).append(e)
+            self._key_index = index
+        return self._key_index
 
     def _backfill_resulting_keys(self, report=None):
         """Entries created this session (played moves, PGN import) already
@@ -2331,6 +2781,7 @@ class MainWindow(QMainWindow):
         start_key = chess.polyglot.zobrist_hash(chess.Board())
         expanded: set[int] = {start_key}
         queue: deque[int] = deque([start_key])
+        self._transposition_state = (in_degree, expanded)  # for _add_to_transposition_cache
 
         while queue:
             key = queue.popleft()
@@ -2345,27 +2796,59 @@ class MainWindow(QMainWindow):
 
         return {key for key, count in in_degree.items() if count > 1}
 
-    def _collect_subtree(self, board_after_move: chess.Board, entry: BookEntry) -> list[BookEntry]:
-        collected = [entry]
-        visited: set[int] = {entry.key}
+    def _add_to_transposition_cache(self, entry: BookEntry):
+        """Updates the transposition cache for one newly added entry, so
+        entering a move doesn't recompute the whole book: the same walk as
+        _transposition_resulting_keys, continued from the new edge."""
+        if self._transposition_cache is None:
+            return  # will be computed from scratch on the next refresh
+        in_degree, expanded = self._transposition_state
+        if entry.key not in expanded:
+            return  # not reachable from the start position
+        entries_by_key = self._index_entries_by_key()
+        pending = [entry]
+        while pending:
+            child_key = pending.pop().resulting_key
+            if child_key is None:
+                continue
+            in_degree[child_key] = in_degree.get(child_key, 0) + 1
+            if in_degree[child_key] > 1:
+                self._transposition_cache.add(child_key)
+            if child_key not in expanded:
+                expanded.add(child_key)
+                pending.extend(entries_by_key.get(child_key, []))
 
-        def walk(board: chess.Board):
-            key = chess.polyglot.zobrist_hash(board)
-            if key in visited:
-                return
-            visited.add(key)
-            for e in self.book_entries:
-                if e.key == key:
-                    move = decode_move(board, e)
-                    if move is None:
-                        continue
-                    collected.append(e)
-                    board.push(move)
-                    walk(board)
-                    board.pop()
+    def _reachable_keys(self, entries_by_key: dict[int, list[BookEntry]],
+                        roots: set[int], skip: BookEntry | None = None) -> set[int]:
+        """Positions reachable from `roots` via cached resulting_key edges,
+        ignoring the entry `skip`."""
+        reached = set(roots)
+        queue: deque[int] = deque(roots)
+        while queue:
+            key = queue.popleft()
+            for e in entries_by_key.get(key, []):
+                if e is skip or e.resulting_key is None or e.resulting_key in reached:
+                    continue
+                reached.add(e.resulting_key)
+                queue.append(e.resulting_key)
+        return reached
 
-        walk(board_after_move)
-        return collected
+    def _entries_orphaned_by(self, entry: BookEntry) -> list[BookEntry]:
+        """entry plus every entry that can no longer be reached once entry is
+        gone. Positions still reachable by another move order (transpositions)
+        are kept. The current position counts as a root, so its subtree is
+        found even if the start position does not lead there."""
+        entries_by_key = self._index_entries_by_key()
+        roots = {chess.polyglot.zobrist_hash(chess.Board()), entry.key}
+        before = self._reachable_keys(entries_by_key, roots)
+        after = self._reachable_keys(entries_by_key, roots, skip=entry)
+        lost = before - after
+        return [entry] + [e for e in self.book_entries if e.key in lost]
+
+    def _remove_entries(self, doomed: list[BookEntry]):
+        doomed_ids = {id(e) for e in doomed}  # list.remove per entry would be quadratic
+        self.book_entries = [e for e in self.book_entries if id(e) not in doomed_ids]
+        self._key_index = None
 
     def _move_lists_to(self, target_key: int, limit: int = 500) -> tuple[list[list[chess.Move]], bool]:
         """All move sequences from the starting position to target_key,
@@ -2419,7 +2902,9 @@ class MainWindow(QMainWindow):
     def _show_transpositions(self, entry: BookEntry):
         move_lists, truncated = self._move_lists_to(entry.resulting_key)
         lines = sorted(((chess.Board().variation_san(moves), moves) for moves in move_lists), key=lambda line: line[0])
-        TranspositionsDialog(lines, truncated, self._load_line, self).exec()
+        move = decode_move(self.board, entry)
+        current = self.game_moves[: self.ply] + [move] if move is not None else None
+        TranspositionsDialog(lines, truncated, self._load_line, self, current).exec()
 
     def _on_line_context_menu(self, pos):
         index = self.line_table.indexAt(pos)
@@ -2479,22 +2964,20 @@ class MainWindow(QMainWindow):
         if not ok or weight == entry.weight:
             return
         entry.weight = weight
-        save_book(self.book_path, self.book_entries)
+        save_book(self.book_path, self.book_entries, self.book_color)
         self.refresh()
 
     def _delete_move(self, entry: BookEntry):
         move = decode_move(self.board, entry)
         if move is None:
-            self.book_entries.remove(entry)
+            self._remove_entries([entry])
             self._transposition_cache = None
-            save_book(self.book_path, self.book_entries)
+            save_book(self.book_path, self.book_entries, self.book_color)
             self.refresh()
             return
 
-        board_after = self.board.copy()
-        board_after.push(move)
-        subtree = self._collect_subtree(board_after, entry)
-        following = len(subtree) - 1
+        doomed = self._entries_orphaned_by(entry)
+        following = len(doomed) - 1
 
         if following > 0:
             question = f"Delete this move and {following} following move(s) from the book?"
@@ -2510,10 +2993,9 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        for e in subtree:
-            self.book_entries.remove(e)
+        self._remove_entries(doomed)
         self._transposition_cache = None
-        save_book(self.book_path, self.book_entries)
+        save_book(self.book_path, self.book_entries, self.book_color)
         self.refresh()
 
     def refresh(self):
@@ -2572,7 +3054,8 @@ class MainWindow(QMainWindow):
         else:
             msg = "Check" if board.is_check() else ""
         self.status_label.setText(msg)
-        self.book_label.setText(f"book: {self.book_path}")
+        color = f" ({self.book_color})" if self.book_color else ""
+        self.book_label.setText(f"book: {self.book_path}{color}")
         self.book_label.setToolTip(self.book_path)
 
 
