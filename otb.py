@@ -19,7 +19,9 @@
 from __future__ import annotations
 
 import base64
+import math
 import os
+import random
 import re
 import struct
 import subprocess
@@ -53,14 +55,18 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QAction,
+    QActionGroup,
     QBrush,
     QColor,
     QCursor,
     QFont,
+    QFontMetricsF,
     QIcon,
     QKeySequence,
+    QLinearGradient,
     QPainter,
     QPainterPath,
+    QPainterPathStroker,
     QPalette,
     QPen,
     QPixmap,
@@ -107,15 +113,27 @@ from PyQt6.QtWidgets import (
 )
 
 MIN_BOARD_SIZE = 320   # smallest the board will shrink to
-AUTOPLAY_INTERVAL_MS = 1000  # "Play from here": time per move
+# "Play from here": time per move for each View > Play Speed setting
+PLAY_SPEEDS_MS = {"Slow": 2000, "Medium": 1000, "Fast": 500}
+DEFAULT_PLAY_SPEED = "Medium"
+# View > Coordinates: setting value -> menu text
+COORDINATE_MODES = {"inside": "Inside Squares", "outside": "Outside", "off": "Off"}
+DEFAULT_COORDINATES = "off"
 PIECE_ANIMATION_MS = 250  # how long a piece glides to its square; Lichess' "normal" animation speed
 RIGHT_PANEL_WIDTH = 280  # constant width for the nav+list panel
 LINE_PANEL_WIDTH = RIGHT_PANEL_WIDTH  # current-line score sheet + nav buttons, same width as the right panel
 DRAG_THRESHOLD = 6  # px of mouse movement before a press counts as a drag
 
 HOVER_ARROW_COLOR = "#ffcc00"         # yellow
-ENGINE_ARROW_COLOR = "#0066ff"        # blue, continuously-updating engine best move
-DRAG_SOURCE_COLOR = "#ffff0088"       # semi-transparent yellow for start square
+# Engine best move, drawn like Lichess' pale blue engine arrow (#003088 at 24%).
+# Sizes in squares: a shaft of 15/512 of the board with round ends, a head 4
+# shaft widths wide and 3 long, the shaft stopping 10/64 before the target
+# square's center so that the tip ends just past it.
+ENGINE_ARROW_COLOR = QColor(0, 48, 136, 61)
+ENGINE_ARROW_WIDTH = 15 / 512 * 8
+ENGINE_ARROW_MARGIN = 10 / 64
+DRAG_SOURCE_COLOR = "#ffff0088"       # semi-transparent yellow for start square (hovering)
+SELECTED_SQUARE_COLOR = "#14551e80"   # clicked start square: Lichess' translucent green, rgba(20, 85, 30, 0.5)
 APP_VERSION = "1.0"
 APP_ORG = "GambitGear"  # shared by all GambitGear apps: data/settings live under GambitGear/<app>
 APP_NAME = "OTB"
@@ -128,12 +146,15 @@ HOVER_ROW_COLOR = QColor(0x88, 0x88, 0x88, 90)  # same mid-grey as button hover
 TRANSPOSITION_ROW_COLOR = QColor(255, 0, 0, 55)  # translucent red overlay for moves
                                                   # whose resulting position is also
                                                   # reachable via a different move order
-TARGET_SQUARE_COLOR = "#3388ff88"     # semi-transparent blue for target squares
+# Where the selected piece can go, marked as on Lichess: a small dot on an
+# empty square, more faintly shaded corners (a circle cut out of the square) on a capture.
+TARGET_MARK_COLOR = QColor(20, 85, 30, 128)  # Lichess' translucent green, as the selected square
+TARGET_CAPTURE_COLOR = QColor(20, 85, 0, 77)   # Lichess: rgba(20, 85, 0, 0.3)
+TARGET_DOT_RADIUS = 0.135       # of the square's side
+TARGET_CAPTURE_RADIUS = 0.565   # of the square's side: wider than the square, only the corners stay shaded
 
-NAV_BUTTON_STYLE = (
-    "QPushButton { padding: 10px 18px; font-size: 12pt; }"
-    "QPushButton:hover:enabled { background-color: #888888; }"
-)
+NAV_BUTTON_ICON_COLOR = QColor("#d9dcdf")  # soft silver, for the symbols on the black MetalButtons
+NAV_BUTTON_STYLE = "QPushButton { padding: 10px 18px; font-size: 12pt; }"  # size only, MetalButton paints itself
 NAV_ICON_SIZE = 22
 
 
@@ -583,7 +604,14 @@ class ModeSwitch(QAbstractButton):
 # Mode board color schemes: {"square light": ..., "square dark": ...}
 BOARD_COLORS = {
     "BUILD": {"square light": "#f2a4a4", "square dark": "#a04040"},    # light / dark red
-    "VIEW": {"square light": "#a4f2a4", "square dark": "#40a040"},  # light / dark green
+    # Lichess' blue-grey board; the previous move is its translucent
+    # yellow-green (rgba(155, 199, 0, 0.41)) laid over the square color
+    "VIEW": {
+        "square light": "#d2d7db",
+        "square dark": "#7b949d",
+        "square light lastmove": "#bbd081",
+        "square dark lastmove": "#88a95d",
+    },
 }
 
 PROMO_TO_CODE = {None: 0, chess.KNIGHT: 1, chess.BISHOP: 2, chess.ROOK: 3, chess.QUEEN: 4}
@@ -934,6 +962,8 @@ class BoardWidget(QWidget):
         self._animation.valueChanged.connect(self._on_glide_step)
         self._animation.finished.connect(self._end_glide)
 
+        self._target_marks: dict[int, bool] = {}  # see redraw
+        self.coordinates = DEFAULT_COORDINATES  # a COORDINATE_MODES key
         self.renderer = QSvgRenderer()
         self.setMinimumSize(MIN_BOARD_SIZE, MIN_BOARD_SIZE)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -1004,11 +1034,102 @@ class BoardWidget(QWidget):
         col, row = (file, 7 - rank) if self.orientation == chess.WHITE else (7 - file, rank)
         return QRectF(rect.left() + col * size, rect.top() + row * size, size, size)
 
+    def set_coordinates(self, mode: str):
+        self.coordinates = mode
+        self.update()
+
+    def _coordinate_margin(self) -> float:
+        """Width of the strip left of and below the squares that holds the
+        coordinates in "outside" mode."""
+        if self.coordinates != "outside":
+            return 0.0
+        return max(14.0, min(self.width(), self.height()) * 0.04)
+
     def board_rect(self) -> QRectF:
+        """The area covered by the 64 squares."""
         w = float(self.width())
         h = float(self.height())
-        side = min(w, h)
-        return QRectF(0.0, 0.0, side, side)
+        margin = self._coordinate_margin()
+        side = min(w, h) - margin
+        return QRectF(margin, 0.0, side, side)
+
+    def _paint_engine_arrow(self, painter: QPainter):
+        # left out if the hover arrow already shows the engine's move
+        if self.engine_arrow is None or self.engine_arrow == self.hover_arrow:
+            return
+        side = self.board_rect().width() / 8.0
+        start, end = (
+            self._square_rect(chess.square_file(square), chess.square_rank(square)).center()
+            for square in self.engine_arrow
+        )
+        length = math.hypot(end.x() - start.x(), end.y() - start.y())
+        if length == 0:
+            return
+        along = QPointF((end.x() - start.x()) / length, (end.y() - start.y()) / length)
+        across = QPointF(-along.y(), along.x())
+        width = side * ENGINE_ARROW_WIDTH
+        shaft_end = end - along * (side * ENGINE_ARROW_MARGIN)
+        # the head's base lies 2.05 shaft widths before the shaft's end, its tip 0.95 after it
+        base = shaft_end - along * (2.05 * width)
+        tip = shaft_end + along * (0.95 * width)
+
+        shaft = QPainterPath(start)
+        shaft.lineTo(shaft_end)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(width)
+        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+        head = QPainterPath()
+        head.addPolygon(QPolygonF([base + across * (2 * width), tip, base - across * (2 * width)]))
+        head.closeSubpath()
+        # united, so that the translucent color isn't doubled where shaft and head overlap
+        painter.fillPath(stroker.createStroke(shaft).united(head), ENGINE_ARROW_COLOR)
+
+    def _paint_coordinates(self, painter: QPainter):
+        if self.coordinates == "off":
+            return
+        rect = self.board_rect()
+        side = rect.width() / 8.0
+        white_down = self.orientation == chess.WHITE
+        files = "abcdefgh" if white_down else "hgfedcba"
+        ranks = "87654321" if white_down else "12345678"
+        font = QFont(self.font())
+        font.setBold(self.coordinates == "inside")  # the small corner letters need the weight
+        painter.save()
+        if self.coordinates == "outside":
+            margin = self._coordinate_margin()
+            font.setPixelSize(max(9, round(margin * 0.7)))
+            painter.setFont(font)
+            painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
+            for i in range(8):
+                painter.drawText(QRectF(0, rect.top() + i * side, margin, side), Qt.AlignmentFlag.AlignCenter, ranks[i])
+                painter.drawText(
+                    QRectF(rect.left() + i * side, rect.bottom(), side, margin), Qt.AlignmentFlag.AlignCenter, files[i]
+                )
+        else:
+            # as on Lichess: ranks in the top right corner of the right-hand
+            # squares, files in the bottom left corner of the bottom squares,
+            # each in the color of the other kind of square
+            colors = BOARD_COLORS.get(self.get_mode(), BOARD_COLORS["VIEW"])
+            light, dark = QColor(colors["square light"]), QColor(colors["square dark"])
+            # sizes and distances measured on a Lichess board, as fractions of a square
+            font.setPixelSize(max(8, round(side * 0.22)))
+            painter.setFont(font)
+            metrics = QFontMetricsF(font)
+            for i in range(8):
+                # the top right and the bottom left square are dark whichever
+                # side is at the bottom; from there the colors alternate
+                painter.setPen(dark if i % 2 == 1 else light)
+                # rank: top of the digit 0.09 below the square's top, 0.05 from its right edge
+                painter.drawText(
+                    QPointF(
+                        rect.right() - side * 0.05 - metrics.horizontalAdvance(ranks[i]),
+                        rect.top() + i * side + side * 0.09 + metrics.capHeight(),
+                    ),
+                    ranks[i],
+                )
+                # file: the letter stands 0.06 above the square's bottom, 0.07 from its left edge
+                painter.drawText(QPointF(rect.left() + i * side + side * 0.07, rect.bottom() - side * 0.06), files[i])
+        painter.restore()
 
     def redraw(self):
         board = self.get_board()
@@ -1016,14 +1137,18 @@ class BoardWidget(QWidget):
         colors = BOARD_COLORS.get(mode, BOARD_COLORS["VIEW"])
         display_board = board
         fill = {}
+        self._target_marks = {}
 
         if self.selected is not None:
             # a piece is actually selected (clicked): show it and where it can go
             piece = board.piece_at(self.selected)
             if piece is not None and piece.color == board.turn:
-                fill[self.selected] = DRAG_SOURCE_COLOR
-                for target in self._legal_targets(board, self.selected):
-                    fill[target] = TARGET_SQUARE_COLOR
+                fill[self.selected] = SELECTED_SQUARE_COLOR
+                # painted over the board in paintEvent; True = capture
+                self._target_marks = {
+                    target: board.piece_at(target) is not None
+                    for target in self._legal_targets(board, self.selected)
+                }
         elif self.hover_square is not None:
             # merely hovering: highlight the start square only, no targets
             piece = board.piece_at(self.hover_square)
@@ -1038,11 +1163,8 @@ class BoardWidget(QWidget):
             for square, piece in self._glide_cover.items():
                 display_board.set_piece_at(square, piece)  # None removes
 
-        # SVG paints in list order, so the hover arrow goes last to stay on
-        # top; if it shows the engine's move, the blue arrow is left out.
+        # the engine arrow is painted over the board in paintEvent
         arrows = []
-        if self.engine_arrow is not None and self.engine_arrow != self.hover_arrow:
-            arrows.append(chess.svg.Arrow(self.engine_arrow[0], self.engine_arrow[1], color=ENGINE_ARROW_COLOR))
         if self.hover_arrow is not None:
             arrows.append(chess.svg.Arrow(self.hover_arrow[0], self.hover_arrow[1], color=HOVER_ARROW_COLOR))
 
@@ -1065,6 +1187,20 @@ class BoardWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.renderer.render(painter, self.board_rect())
+        self._paint_coordinates(painter)
+        for square, is_capture in self._target_marks.items():
+            rect = self._square_rect(chess.square_file(square), chess.square_rank(square))
+            side = rect.width()
+            mark = QPainterPath()
+            if is_capture:
+                circle = QPainterPath()
+                circle.addEllipse(rect.center(), side * TARGET_CAPTURE_RADIUS, side * TARGET_CAPTURE_RADIUS)
+                mark.addRect(rect)
+                mark = mark.subtracted(circle)
+            else:
+                mark.addEllipse(rect.center(), side * TARGET_DOT_RADIUS, side * TARGET_DOT_RADIUS)
+            painter.fillPath(mark, TARGET_CAPTURE_COLOR if is_capture else TARGET_MARK_COLOR)
+        self._paint_engine_arrow(painter)
         t = self._glide_progress
         for piece, origin, target in self._gliding:
             renderer = self._piece_renderers.get(piece.symbol())
@@ -1402,6 +1538,104 @@ class HoverListWidget(QListWidget):
 # mouse events, plain QWidget::resize() calls -- so it never leaves Qt's
 # control and can't be left in that stuck state.
 # --------------------------------------------------------------------------
+
+class MetalButton(QPushButton):
+    """Icon button that looks like a half-round bar of polished black metal
+    with a matt finish: shaded like a cylinder seen from the front (a soft
+    light band above the middle, falling off to dark at the bottom) without
+    glossy reflections, very fine brush marks running across it and a thin
+    worn edge. Same in light and dark mode."""
+    RADIUS = 6.0
+    #          top edge, light band (at 30%), middle, bottom edge
+    SURFACES = {
+        "normal": ("#2f3134", "#505358", "#333538", "#0e0e0f"),
+        "hover": ("#505358", "#858a92", "#5a5e63", "#262829"),
+        "pressed": ("#0c0c0d", "#1f2022", "#2c2e31", "#3c3e42"),
+        "disabled": ("#303133", "#3b3c3e", "#323335", "#262728"),
+    }
+    BRUSH_MARKS_SCALE = 5  # drawn this much larger, then scaled down: hair-fine lines
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)  # repaint on enter/leave
+        self._brush_marks: QPixmap | None = None
+
+    def _brush_marks_pixmap(self) -> QPixmap:
+        """Fine horizontal scratches, lighter and darker than the surface.
+        Seeded, so every button of a size shows the same, stable pattern."""
+        ratio = self.devicePixelRatioF()
+        size = self.size() * ratio
+        if self._brush_marks is None or self._brush_marks.size() != size:
+            large = size * self.BRUSH_MARKS_SCALE
+            pixmap = QPixmap(large)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            rng = random.Random(7)
+            painter = QPainter(pixmap)
+            for _ in range(large.height() * 12):
+                y = rng.randrange(large.height())
+                x = rng.randrange(-large.width() // 2, large.width())
+                shade = 255 if rng.random() < 0.55 else 0
+                painter.setPen(QColor(shade, shade, shade, rng.randint(5, 20)))
+                painter.drawLine(x, y, x + rng.randint(large.width() // 10, large.width() // 3), y)
+            painter.end()
+            pixmap = pixmap.scaled(
+                size, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation
+            )
+            pixmap.setDevicePixelRatio(ratio)
+            self._brush_marks = pixmap
+        return self._brush_marks
+
+    def paintEvent(self, event):
+        if not self.isEnabled():
+            state = "disabled"
+        elif self.isDown():
+            state = "pressed"
+        elif self.underMouse():
+            state = "hover"
+        else:
+            state = "normal"
+        top, band, middle, bottom = self.SURFACES[state]
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        shape = QPainterPath()
+        shape.addRoundedRect(rect, self.RADIUS, self.RADIUS)
+
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        gradient.setColorAt(0.0, QColor(top))
+        gradient.setColorAt(0.3, QColor(band))
+        gradient.setColorAt(0.6, QColor(middle))
+        gradient.setColorAt(1.0, QColor(bottom))
+        painter.fillPath(shape, gradient)
+
+        painter.save()
+        painter.setClipPath(shape)
+        painter.setOpacity(0.45 if state == "disabled" else 1.0)
+        painter.drawPixmap(0, 0, self._brush_marks_pixmap())
+        painter.restore()
+
+        # worn edge: a dull light line inside the top (bottom when pressed in), dark outline
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if state != "disabled":
+            inner = rect.adjusted(1, 1, -1, -1)
+            edge = QLinearGradient(inner.topLeft(), inner.bottomLeft())
+            light, none = QColor(255, 255, 255, 38), QColor(255, 255, 255, 0)
+            edge.setColorAt(0.0, none if state == "pressed" else light)
+            edge.setColorAt(0.5, none)
+            edge.setColorAt(1.0, light if state == "pressed" else none)
+            painter.setPen(QPen(QBrush(edge), 1.0))
+            painter.drawRoundedRect(inner, self.RADIUS - 1, self.RADIUS - 1)
+        outline = {"disabled": "#1a1a1b", "hover": "#b9bec6"}.get(state, "#0b0b0c")  # hover: bright rim
+        painter.setPen(QPen(QColor(outline), 1.0))
+        painter.drawPath(shape)
+
+        icon_size = self.iconSize()
+        icon_rect = QRectF(0, 0, icon_size.width(), icon_size.height())
+        icon_rect.moveCenter(rect.center() + (QPointF(0, 1) if state == "pressed" else QPointF(0, 0)))
+        mode = QIcon.Mode.Normal if self.isEnabled() else QIcon.Mode.Disabled
+        self.icon().paint(painter, icon_rect.toRect(), Qt.AlignmentFlag.AlignCenter, mode)
+
 
 class ManualSizeGrip(QWidget):
     """left=True: the grip for the bottom left corner. Dragging it moves the
@@ -2001,7 +2235,9 @@ class MainWindow(QMainWindow):
         self._transposition_cache: set[int] | None = None
         self._key_index: dict[int, list[BookEntry]] | None = None  # see _index_entries_by_key
         self._autoplay_timer = QTimer(self)  # "Play from here" in the line's context menu
-        self._autoplay_timer.setInterval(AUTOPLAY_INTERVAL_MS)
+        speed = _settings().value("play_speed", DEFAULT_PLAY_SPEED, type=str)
+        self.play_speed = speed if speed in PLAY_SPEEDS_MS else DEFAULT_PLAY_SPEED
+        self._autoplay_timer.setInterval(PLAY_SPEEDS_MS[self.play_speed])
         self._autoplay_timer.timeout.connect(self._autoplay_step)
         self._load_book(self.book_path)
         self.setWindowTitle("Opening Tree Builder")
@@ -2036,28 +2272,28 @@ class MainWindow(QMainWindow):
         self.line_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.line_table.customContextMenuRequested.connect(self._on_line_context_menu)
 
-        self.btn_start = QPushButton()
-        self.btn_start.setIcon(_make_skip_start_icon())
+        self.btn_start = MetalButton()
+        self.btn_start.setIcon(_make_skip_start_icon(color=NAV_BUTTON_ICON_COLOR))
         self.btn_start.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
         self.btn_start.setToolTip("Go to start (Home)")
 
-        self.btn_back = QPushButton()
-        self.btn_back.setIcon(_make_step_back_icon())
+        self.btn_back = MetalButton()
+        self.btn_back.setIcon(_make_step_back_icon(color=NAV_BUTTON_ICON_COLOR))
         self.btn_back.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
         self.btn_back.setToolTip("Step back (←)")
 
-        self.btn_forward = QPushButton()
-        self.btn_forward.setIcon(_make_step_forward_icon())
+        self.btn_forward = MetalButton()
+        self.btn_forward.setIcon(_make_step_forward_icon(color=NAV_BUTTON_ICON_COLOR))
         self.btn_forward.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
         self.btn_forward.setToolTip("Step forward (→)")
 
-        self.btn_end = QPushButton()
-        self.btn_end.setIcon(_make_skip_end_icon())
+        self.btn_end = MetalButton()
+        self.btn_end.setIcon(_make_skip_end_icon(color=NAV_BUTTON_ICON_COLOR))
         self.btn_end.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
         self.btn_end.setToolTip("Go to end (End)")
 
-        self.btn_flip = QPushButton()
-        self.btn_flip.setIcon(_make_flip_icon())
+        self.btn_flip = MetalButton()
+        self.btn_flip.setIcon(_make_flip_icon(color=NAV_BUTTON_ICON_COLOR))
         self.btn_flip.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
         self.btn_flip.setToolTip("Flip board (F)")
 
@@ -2250,6 +2486,29 @@ class MainWindow(QMainWindow):
         select_engine_action = QAction("Select Engine…", self)
         select_engine_action.triggered.connect(self._select_engine_dialog)
         file_menu.addAction(select_engine_action)
+
+        view_menu = self.menuBar().addMenu("View")
+        speed_menu = view_menu.addMenu("Play Speed")
+        speed_group = QActionGroup(self)  # exclusive: exactly one speed is ticked
+        for speed in PLAY_SPEEDS_MS:
+            action = speed_menu.addAction(speed)
+            action.setCheckable(True)
+            action.setChecked(speed == self.play_speed)
+            action.triggered.connect(lambda _checked, speed=speed: self._set_play_speed(speed))
+            speed_group.addAction(action)
+
+        coordinates_menu = view_menu.addMenu("Coordinates")
+        coordinates_group = QActionGroup(self)
+        current = _settings().value("coordinates", DEFAULT_COORDINATES, type=str)
+        if current not in COORDINATE_MODES:
+            current = DEFAULT_COORDINATES
+        self.board_widget.set_coordinates(current)
+        for mode, text in COORDINATE_MODES.items():
+            action = coordinates_menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(mode == current)
+            action.triggered.connect(lambda _checked, mode=mode: self._set_coordinates(mode))
+            coordinates_group.addAction(action)
 
         search_menu = self.menuBar().addMenu("Search")
         search_fen_action = QAction("by FEN…", self)
@@ -3036,6 +3295,15 @@ class MainWindow(QMainWindow):
         elif chosen == copy_pgn_action:
             # '*' = PGN result terminator (unknown), as in the Transpositions dialog
             QApplication.clipboard().setText(f"{chess.Board().variation_san(moves)} *\n")
+
+    def _set_coordinates(self, mode: str):
+        self.board_widget.set_coordinates(mode)
+        _settings().setValue("coordinates", mode)
+
+    def _set_play_speed(self, speed: str):
+        self.play_speed = speed
+        self._autoplay_timer.setInterval(PLAY_SPEEDS_MS[speed])  # also restarts a running playback at the new pace
+        _settings().setValue("play_speed", speed)
 
     def _start_autoplay(self, ply: int):
         """Shows the position before move number `ply` of the current line,
