@@ -47,6 +47,7 @@ from PyQt6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    QVariantAnimation,
     pyqtProperty,
     pyqtSignal,
 )
@@ -106,6 +107,8 @@ from PyQt6.QtWidgets import (
 )
 
 MIN_BOARD_SIZE = 320   # smallest the board will shrink to
+AUTOPLAY_INTERVAL_MS = 1000  # "Play from here": time per move
+PIECE_ANIMATION_MS = 250  # how long a piece glides to its square; Lichess' "normal" animation speed
 RIGHT_PANEL_WIDTH = 280  # constant width for the nav+list panel
 LINE_PANEL_WIDTH = RIGHT_PANEL_WIDTH  # current-line score sheet + nav buttons, same width as the right panel
 DRAG_THRESHOLD = 6  # px of mouse movement before a press counts as a drag
@@ -915,6 +918,22 @@ class BoardWidget(QWidget):
         self.drag_label: QSvgWidget | None = None
         self._drag_label_size = 0
 
+        # Piece animation: while it runs, the gliding pieces are left out of
+        # the board image and painted on top of it at their current spot.
+        self._shown_pieces: dict[int, chess.Piece] | None = None  # position last handed to animate_to_position
+        self._gliding: list[tuple[chess.Piece, int, int]] = []    # piece, from square, to square
+        self._glide_cover: dict[int, chess.Piece | None] = {}     # what the target squares show meanwhile
+        self._glide_progress = 1.0
+        self._dropped_square: int | None = None  # a piece dragged here is already in place
+        self._piece_renderers: dict[str, QSvgRenderer] = {}
+        self._animation = QVariantAnimation(self)
+        self._animation.setStartValue(0.0)
+        self._animation.setEndValue(1.0)
+        self._animation.setDuration(PIECE_ANIMATION_MS)
+        self._animation.setEasingCurve(QEasingCurve.Type.InOutCubic)  # as Lichess (chessground)
+        self._animation.valueChanged.connect(self._on_glide_step)
+        self._animation.finished.connect(self._end_glide)
+
         self.renderer = QSvgRenderer()
         self.setMinimumSize(MIN_BOARD_SIZE, MIN_BOARD_SIZE)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -936,6 +955,54 @@ class BoardWidget(QWidget):
     def flip(self):
         self.orientation = not self.orientation
         self.redraw()
+
+    def animate_to_position(self):
+        """Call when the position on the board has changed, before anything
+        redraws: lets the pieces glide from where they were shown to their
+        new squares. Works out what moved by comparing the two positions (as
+        Lichess does), so it covers single moves in both directions, castling
+        and jumps over several moves alike."""
+        old, new = self._shown_pieces, self.get_board().piece_map()
+        self._shown_pieces = new
+        dropped, self._dropped_square = self._dropped_square, None
+        self._end_glide(redraw=False)
+        if old is None or old == new:
+            return
+        # pieces that left their square, and squares that got a different piece
+        left = {sq: piece for sq, piece in old.items() if new.get(sq) != piece}
+        for sq, piece in new.items():
+            if old.get(sq) == piece or sq == dropped:
+                continue
+            origins = [origin for origin, other in left.items() if other == piece]
+            if not origins:
+                continue  # no such piece left a square (e.g. a promotion): it just appears
+            origin = min(origins, key=lambda o: chess.square_distance(o, sq))
+            del left[origin]
+            self._gliding.append((piece, origin, sq))
+            # until the piece arrives, its square shows what stood there (a captured piece)
+            self._glide_cover[sq] = old.get(sq)
+        if self._gliding:
+            self._glide_progress = 0.0
+            self._animation.start()
+
+    def _on_glide_step(self, progress):
+        self._glide_progress = float(progress)
+        self.update()
+
+    def _end_glide(self, redraw: bool = True):
+        self._animation.stop()
+        if self._gliding:
+            self._gliding = []
+            self._glide_cover = {}
+            if redraw:
+                self.redraw()
+
+    def _square_rect(self, file: float, rank: float) -> QRectF:
+        """Screen rectangle of a (possibly fractional) square position."""
+        rect = self.board_rect()
+        size = rect.width() / 8.0
+        col, row = (file, 7 - rank) if self.orientation == chess.WHITE else (7 - file, rank)
+        return QRectF(rect.left() + col * size, rect.top() + row * size, size, size)
 
     def board_rect(self) -> QRectF:
         w = float(self.width())
@@ -966,6 +1033,10 @@ class BoardWidget(QWidget):
         if self.selected is not None and self.dragging:
             display_board = board.copy()
             display_board.remove_piece_at(self.selected)
+        if self._gliding:
+            display_board = display_board.copy()
+            for square, piece in self._glide_cover.items():
+                display_board.set_piece_at(square, piece)  # None removes
 
         # SVG paints in list order, so the hover arrow goes last to stay on
         # top; if it shows the engine's move, the blue arrow is left out.
@@ -994,6 +1065,15 @@ class BoardWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.renderer.render(painter, self.board_rect())
+        t = self._glide_progress
+        for piece, origin, target in self._gliding:
+            renderer = self._piece_renderers.get(piece.symbol())
+            if renderer is None:
+                renderer = QSvgRenderer(chess.svg.piece(piece).encode("utf-8"))
+                self._piece_renderers[piece.symbol()] = renderer
+            file = chess.square_file(origin) + (chess.square_file(target) - chess.square_file(origin)) * t
+            rank = chess.square_rank(origin) + (chess.square_rank(target) - chess.square_rank(origin)) * t
+            renderer.render(painter, self._square_rect(file, rank))
 
     def resizeEvent(self, event):
         self.update()
@@ -1136,6 +1216,7 @@ class BoardWidget(QWidget):
             move = self._build_move(self.get_board(), from_sq, target)
             if move in self.get_board().legal_moves:
                 self.selected = None
+                self._dropped_square = target  # dropped by hand: nothing left to glide
                 self.on_move(move)
                 return
         self.redraw()
@@ -1323,15 +1404,21 @@ class HoverListWidget(QListWidget):
 # --------------------------------------------------------------------------
 
 class ManualSizeGrip(QWidget):
+    """left=True: the grip for the bottom left corner. Dragging it moves the
+    window's left edge, so the window has to be moved along with the resize.
+    A Wayland client can't move its own window; there the left grip has to
+    hand the resize to the compositor after all."""
     GRIP_SIZE = 28
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, left: bool = False):
         super().__init__(parent)
+        self.left = left
         self.setFixedSize(self.GRIP_SIZE, self.GRIP_SIZE)
-        self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        self.setCursor(Qt.CursorShape.SizeBDiagCursor if left else Qt.CursorShape.SizeFDiagCursor)
         self._dragging = False
         self._drag_start_pos: QPoint | None = None
         self._start_size = None
+        self._start_geometry = None
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1342,13 +1429,23 @@ class ManualSizeGrip(QWidget):
         painter.setPen(pen)
         w, h = self.width(), self.height()
         for offset in (6, 13, 20):
-            painter.drawLine(w - offset, h - 2, w - 2, h - offset)
+            if self.left:
+                painter.drawLine(offset, h - 2, 2, h - offset)
+            else:
+                painter.drawLine(w - offset, h - 2, w - 2, h - offset)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            if self.left and QApplication.platformName().startswith("wayland"):
+                handle = self.window().windowHandle()
+                if handle is not None:
+                    handle.startSystemResize(Qt.Edge.BottomEdge | Qt.Edge.LeftEdge)
+                event.accept()
+                return
             self._dragging = True
             self._drag_start_pos = event.globalPosition().toPoint()
             self._start_size = self.window().size()
+            self._start_geometry = self.window().geometry()
             event.accept()
 
     def mouseMoveEvent(self, event):
@@ -1356,9 +1453,16 @@ class ManualSizeGrip(QWidget):
             return
         delta = event.globalPosition().toPoint() - self._drag_start_pos
         window = self.window()
-        new_width = max(window.minimumWidth(), self._start_size.width() + delta.x())
         new_height = max(window.minimumHeight(), self._start_size.height() + delta.y())
-        window.resize(new_width, new_height)
+        if self.left:
+            # minimumSizeHint too: if the layout refused a smaller width, the right edge would wander
+            min_width = max(window.minimumWidth(), window.minimumSizeHint().width())
+            new_width = max(min_width, self._start_size.width() - delta.x())
+            start = self._start_geometry
+            window.setGeometry(start.x() + start.width() - new_width, start.y(), new_width, new_height)
+        else:
+            new_width = max(window.minimumWidth(), self._start_size.width() + delta.x())
+            window.resize(new_width, new_height)
         event.accept()
 
     def mouseReleaseEvent(self, event):
@@ -1896,6 +2000,9 @@ class MainWindow(QMainWindow):
                 self.book_path = _default_book_path()
         self._transposition_cache: set[int] | None = None
         self._key_index: dict[int, list[BookEntry]] | None = None  # see _index_entries_by_key
+        self._autoplay_timer = QTimer(self)  # "Play from here" in the line's context menu
+        self._autoplay_timer.setInterval(AUTOPLAY_INTERVAL_MS)
+        self._autoplay_timer.timeout.connect(self._autoplay_step)
         self._load_book(self.book_path)
         self.setWindowTitle("Opening Tree Builder")
 
@@ -2085,8 +2192,9 @@ class MainWindow(QMainWindow):
         self.eval_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.eval_label.setMinimumWidth(self.eval_label.fontMetrics().horizontalAdvance("-99.99 (99)") + 12)
         self.eval_label.setToolTip("Engine evaluation from White's point of view (search depth)")
+        self.statusBar().addWidget(ManualSizeGrip(self, left=True))
         self.statusBar().addWidget(self.eval_label)  # leftmost, before the status text
-        # eval | check/mate message ............ book path | size grip
+        # size grip | eval | check/mate message ............ book path | size grip
         self.status_label = QLabel()
         self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.statusBar().addWidget(self.status_label, 1)
@@ -2913,10 +3021,14 @@ class MainWindow(QMainWindow):
         ply = index.row() * 2 + index.column() + 1
         moves = self.game_moves[:ply]
         menu = QMenu(self)
+        play_action = menu.addAction("Play from here")
+        menu.addSeparator()
         copy_fen_action = menu.addAction("Copy FEN")
         copy_pgn_action = menu.addAction("Copy PGN")
         chosen = menu.exec(self.line_table.viewport().mapToGlobal(pos))
-        if chosen == copy_fen_action:
+        if chosen == play_action:
+            self._start_autoplay(ply)
+        elif chosen == copy_fen_action:
             board = chess.Board()
             for move in moves:
                 board.push(move)
@@ -2924,6 +3036,33 @@ class MainWindow(QMainWindow):
         elif chosen == copy_pgn_action:
             # '*' = PGN result terminator (unknown), as in the Transpositions dialog
             QApplication.clipboard().setText(f"{chess.Board().variation_san(moves)} *\n")
+
+    def _start_autoplay(self, ply: int):
+        """Shows the position before move number `ply` of the current line,
+        then plays the line move by move until its end. Any mouse click or
+        key press stops it (and then does what it normally does)."""
+        self.goto_ply(ply - 1)
+        self._autoplay_timer.start()
+        QApplication.instance().installEventFilter(self)
+        self._update_status()
+
+    def _stop_autoplay(self):
+        if self._autoplay_timer.isActive():
+            self._autoplay_timer.stop()
+            QApplication.instance().removeEventFilter(self)
+            self._update_status()
+
+    def _autoplay_step(self):
+        self.goto_ply(self.ply + 1)
+        if self.ply >= len(self.game_moves):
+            self._stop_autoplay()
+
+    def eventFilter(self, obj, event):
+        # installed only while "Play from here" runs
+        # ShortcutOverride: keys bound to a shortcut (arrows, F, E) never arrive as KeyPress
+        if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride):
+            self._stop_autoplay()
+        return super().eventFilter(obj, event)
 
     def _load_line(self, moves: list[chess.Move]):
         """Makes moves the current line and jumps to its end."""
@@ -3000,6 +3139,7 @@ class MainWindow(QMainWindow):
 
     def refresh(self):
         self.board_widget.clear_selection()
+        self.board_widget.animate_to_position()
         self.board_widget.set_hover_arrow(None)
         self.board_widget.set_engine_arrow(None)
         self.eval_label.setText("")  # stale until the engine reports for the new position
@@ -3053,6 +3193,8 @@ class MainWindow(QMainWindow):
             msg = "Stalemate"
         else:
             msg = "Check" if board.is_check() else ""
+        if self._autoplay_timer.isActive():
+            msg = "Playing — click to stop"
         self.status_label.setText(msg)
         color = f" ({self.book_color})" if self.book_color else ""
         self.book_label.setText(f"book: {self.book_path}{color}")
