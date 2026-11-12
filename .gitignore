@@ -5,6 +5,9 @@ venv/
 # Exclude all binary files
 *.bin
 
+# Exclude PGN game collections (import material)
+*.pgn
+
 # Exclude Python bytecode caches
 __pycache__/
 *.pyc
