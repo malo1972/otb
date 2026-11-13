@@ -135,6 +135,13 @@ HOVER_ARROW_COLOR = "#ffcc00"         # yellow
 ENGINE_ARROW_COLOR = QColor(0, 48, 136, 61)
 ENGINE_ARROW_WIDTH = 15 / 512 * 8
 ENGINE_ARROW_MARGIN = 10 / 64
+# Arrows and circles drawn by hand with the right mouse button, as on Lichess:
+# its green (#15781b; Lichess shows all its shapes at 60%), a thinner shaft,
+# and a ring just inside the square. They live only in memory and only while
+# the position they were drawn on is shown.
+USER_SHAPE_COLOR = QColor(0x15, 0x78, 0x1B, 153)
+USER_ARROW_WIDTH = 10 / 512 * 8
+USER_CIRCLE_WIDTH = 4 / 64
 DRAG_SOURCE_COLOR = "#ffff0088"       # semi-transparent yellow for start square (hovering)
 SELECTED_SQUARE_COLOR = "#14551e80"   # clicked start square: Lichess' translucent green, rgba(20, 85, 30, 0.5)
 APP_VERSION = "1.1"
@@ -966,6 +973,10 @@ class BoardWidget(QWidget):
         self._animation.finished.connect(self._end_glide)
 
         self._target_marks: dict[int, bool] = {}  # see redraw
+        # drawn with the right mouse button: (from square, to square); the
+        # same square twice is a circle
+        self._user_shapes: list[tuple[int, int]] = []
+        self._drawing_shape: tuple[int, int] | None = None  # while the button is held
         self.coordinates = DEFAULT_COORDINATES  # a COORDINATE_MODES key
         self.renderer = QSvgRenderer()
         self.setMinimumSize(MIN_BOARD_SIZE, MIN_BOARD_SIZE)
@@ -1001,6 +1012,8 @@ class BoardWidget(QWidget):
         self._end_glide(redraw=False)
         if old is None or old == new:
             return
+        self._user_shapes = []  # hand-drawn arrows belong to the position they were drawn on
+        self._drawing_shape = None
         # pieces that left their square, and squares that got a different piece
         left = {sq: piece for sq, piece in old.items() if new.get(sq) != piece}
         for sq, piece in new.items():
@@ -1065,21 +1078,19 @@ class BoardWidget(QWidget):
         side = math.floor((min(w, h) - margin) * ratio / 8) * 8 / ratio
         return QRectF(margin, 0.0, side, side)
 
-    def _paint_engine_arrow(self, painter: QPainter):
-        # left out if the hover arrow already shows the engine's move
-        if self.engine_arrow is None or self.engine_arrow == self.hover_arrow:
-            return
+    def _paint_arrow(self, painter: QPainter, arrow: tuple[int, int], color: QColor, width: float):
+        """Arrow in Lichess' proportions; width: of the shaft, in squares."""
         side = self.board_rect().width() / 8.0
         start, end = (
             self._square_rect(chess.square_file(square), chess.square_rank(square)).center()
-            for square in self.engine_arrow
+            for square in arrow
         )
         length = math.hypot(end.x() - start.x(), end.y() - start.y())
         if length == 0:
             return
         along = QPointF((end.x() - start.x()) / length, (end.y() - start.y()) / length)
         across = QPointF(-along.y(), along.x())
-        width = side * ENGINE_ARROW_WIDTH
+        width *= side
         shaft_end = end - along * (side * ENGINE_ARROW_MARGIN)
         # the head's base lies 2.05 shaft widths before the shaft's end, its tip 0.95 after it
         base = shaft_end - along * (2.05 * width)
@@ -1093,8 +1104,27 @@ class BoardWidget(QWidget):
         head = QPainterPath()
         head.addPolygon(QPolygonF([base + across * (2 * width), tip, base - across * (2 * width)]))
         head.closeSubpath()
-        # united, so that the translucent color isn't doubled where shaft and head overlap
-        painter.fillPath(stroker.createStroke(shaft).united(head), ENGINE_ARROW_COLOR)
+        # united, so that a translucent color isn't doubled where shaft and head overlap
+        painter.fillPath(stroker.createStroke(shaft).united(head), color)
+
+    def _paint_user_shapes(self, painter: QPainter):
+        side = self.board_rect().width() / 8.0
+        shapes = [(shape, False) for shape in self._user_shapes]
+        if self._drawing_shape is not None:
+            shapes.append((self._drawing_shape, True))
+        for (origin, target), in_progress in shapes:
+            painter.setOpacity(0.9 if in_progress else 1.0)
+            scale = 0.85 if in_progress else 1.0  # slightly lighter while the button is held, as on Lichess
+            if origin == target:
+                ring = side * USER_CIRCLE_WIDTH * scale
+                rect = self._square_rect(chess.square_file(origin), chess.square_rank(origin))
+                painter.setPen(QPen(USER_SHAPE_COLOR, ring))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                radius = side / 2 - ring / 2
+                painter.drawEllipse(rect.center(), radius, radius)
+            else:
+                self._paint_arrow(painter, (origin, target), USER_SHAPE_COLOR, USER_ARROW_WIDTH * scale)
+        painter.setOpacity(1.0)
 
     def _paint_coordinates(self, painter: QPainter):
         if self.coordinates == "off":
@@ -1212,7 +1242,10 @@ class BoardWidget(QWidget):
             else:
                 mark.addEllipse(rect.center(), side * TARGET_DOT_RADIUS, side * TARGET_DOT_RADIUS)
             painter.fillPath(mark, TARGET_CAPTURE_COLOR if is_capture else TARGET_MARK_COLOR)
-        self._paint_engine_arrow(painter)
+        # left out if the hover arrow already shows the engine's move
+        if self.engine_arrow is not None and self.engine_arrow != self.hover_arrow:
+            self._paint_arrow(painter, self.engine_arrow, ENGINE_ARROW_COLOR, ENGINE_ARROW_WIDTH)
+        self._paint_user_shapes(painter)
         t = self._glide_progress
         for piece, origin, target in self._gliding:
             renderer = self._piece_renderers.get(piece.symbol())
@@ -1300,6 +1333,17 @@ class BoardWidget(QWidget):
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
         square = self._square_at(pos)
+        if event.button() == Qt.MouseButton.RightButton:
+            # start drawing: an arrow if dragged to another square, else a circle
+            if square is not None:
+                self._drawing_shape = (square, square)
+                self.update()
+            return
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._user_shapes:  # a left-click wipes the drawings, as on Lichess
+            self._user_shapes = []
+            self.update()
         if square is None:
             return
         board = self.get_board()
@@ -1330,6 +1374,11 @@ class BoardWidget(QWidget):
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
         sq = self._square_at(pos)
+        if self._drawing_shape is not None:
+            if sq is not None and sq != self._drawing_shape[1]:
+                self._drawing_shape = (self._drawing_shape[0], sq)
+                self.update()
+            return
         if sq != self.hover_square:
             self.hover_square = sq
             if self.selected is None:
@@ -1346,6 +1395,15 @@ class BoardWidget(QWidget):
         self._move_drag_label(pos)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            shape, self._drawing_shape = self._drawing_shape, None
+            if shape is not None:
+                if shape in self._user_shapes:
+                    self._user_shapes.remove(shape)  # drawing a shape again removes it
+                else:
+                    self._user_shapes.append(shape)
+                self.update()
+            return
         if self.selected is None:
             return
         pos = event.position().toPoint()
