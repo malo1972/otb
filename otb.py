@@ -113,11 +113,11 @@ from PyQt6.QtWidgets import (
 )
 
 MIN_BOARD_SIZE = 320   # smallest the board will shrink to
-# "Play from here": time per move for each View > Play Speed setting
+# "Autoplay from here": time per move for each View > Autoplay Speed setting
 PLAY_SPEEDS_MS = {"Slow": 2000, "Medium": 1000, "Fast": 500}
 DEFAULT_PLAY_SPEED = "Medium"
 # View > Coordinates: setting value -> menu text
-COORDINATE_MODES = {"inside": "Inside Squares", "outside": "Outside", "off": "Off"}
+COORDINATE_MODES = {"inside": "Inside the Board", "outside": "Outside the Board", "off": "None"}
 DEFAULT_COORDINATES = "off"
 # How long a piece glides to its square, for each View > Animation Speed
 # setting; the same as Lichess' slow / normal / fast.
@@ -127,7 +127,12 @@ RIGHT_PANEL_WIDTH = 280  # constant width for the nav+list panel
 LINE_PANEL_WIDTH = RIGHT_PANEL_WIDTH  # current-line score sheet + nav buttons, same width as the right panel
 DRAG_THRESHOLD = 6  # px of mouse movement before a press counts as a drag
 
-HOVER_ARROW_COLOR = "#ffcc00"         # yellow
+# Book move under the mouse: a thin, solid yellow arrow. Sizes in squares:
+# the tip stops 0.1 before the target square's center.
+HOVER_ARROW_COLOR = QColor("#ffcc00")
+HOVER_ARROW_WIDTH = 0.1
+HOVER_ARROW_HEAD = 0.375   # length and width of the head
+HOVER_ARROW_MARGIN = 0.1
 # Engine best move, drawn like Lichess' pale blue engine arrow (#003088 at 24%).
 # Sizes in squares: a shaft of 15/512 of the board with round ends, a head 4
 # shaft widths wide and 3 long, the shaft stopping 10/64 before the target
@@ -627,54 +632,6 @@ BOARD_COLORS = {
 PROMO_TO_CODE = {None: 0, chess.KNIGHT: 1, chess.BISHOP: 2, chess.ROOK: 3, chess.QUEEN: 4}
 CODE_TO_PROMO = {v: k for k, v in PROMO_TO_CODE.items()}
 
-_ARROW_PAIR_RE = re.compile(
-    r'(<line\b[^>]*class="arrow"[^>]*>)\s*(<polygon\b[^>]*class="arrow"[^>]*>)'
-)
-_STROKE_WIDTH_RE = re.compile(r'stroke-width="([\d.]+)"')
-_POINTS_RE = re.compile(r'points="([^"]+)"')
-_X2_RE = re.compile(r'x2="[^"]+"')
-_Y2_RE = re.compile(r'y2="[^"]+"')
-ARROW_THIN_FACTOR = 0.5
-
-
-def _thin_arrows(svg_data: str) -> str:
-    """chess.svg.Arrow has no thickness option: the shaft is a <line> that
-    stops short to make room for a fixed-size <polygon> arrowhead. Shrink
-    both by ARROW_THIN_FACTOR, keeping the polygon's tip (its first point)
-    anchored -- and pull the line's endpoint in to meet the new, smaller
-    polygon base, so there's no gap between shaft and head."""
-
-    def shrink_pair(match: re.Match) -> str:
-        line_tag, poly_tag = match.group(1), match.group(2)
-
-        line_tag = _STROKE_WIDTH_RE.sub(
-            lambda m: f'stroke-width="{float(m.group(1)) * ARROW_THIN_FACTOR:g}"', line_tag
-        )
-
-        pts_match = _POINTS_RE.search(poly_tag)
-        if not pts_match:
-            return line_tag + poly_tag
-        points = [tuple(map(float, p.split(","))) for p in pts_match.group(1).split()]
-        if len(points) != 3:
-            return line_tag + poly_tag
-
-        tip_x, tip_y = points[0]
-        scaled = [points[0]] + [
-            (tip_x + (x - tip_x) * ARROW_THIN_FACTOR, tip_y + (y - tip_y) * ARROW_THIN_FACTOR)
-            for x, y in points[1:]
-        ]
-        new_points = " ".join(f"{x:g},{y:g}" for x, y in scaled)
-        poly_tag = _POINTS_RE.sub(f'points="{new_points}"', poly_tag)
-
-        mid_x = (scaled[1][0] + scaled[2][0]) / 2
-        mid_y = (scaled[1][1] + scaled[2][1]) / 2
-        line_tag = _X2_RE.sub(f'x2="{mid_x:g}"', line_tag)
-        line_tag = _Y2_RE.sub(f'y2="{mid_y:g}"', line_tag)
-
-        return line_tag + poly_tag
-
-    return _ARROW_PAIR_RE.sub(shrink_pair, svg_data)
-
 
 # --------------------------------------------------------------------------
 # Polyglot book: minimal self-contained reader/writer keyed on Zobrist hash.
@@ -1107,6 +1064,27 @@ class BoardWidget(QWidget):
         # united, so that a translucent color isn't doubled where shaft and head overlap
         painter.fillPath(stroker.createStroke(shaft).united(head), color)
 
+    def _paint_hover_arrow(self, painter: QPainter):
+        side = self.board_rect().width() / 8.0
+        start, end = (
+            self._square_rect(chess.square_file(square), chess.square_rank(square)).center()
+            for square in self.hover_arrow
+        )
+        length = math.hypot(end.x() - start.x(), end.y() - start.y())
+        if length == 0:
+            return
+        along = QPointF((end.x() - start.x()) / length, (end.y() - start.y()) / length)
+        across = QPointF(-along.y(), along.x())
+        tip = end - along * (side * HOVER_ARROW_MARGIN)
+        base = tip - along * (side * HOVER_ARROW_HEAD)
+        painter.setPen(QPen(HOVER_ARROW_COLOR, side * HOVER_ARROW_WIDTH, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+        painter.drawLine(start, base)
+        half = across * (side * HOVER_ARROW_HEAD / 2)
+        head = QPainterPath()
+        head.addPolygon(QPolygonF([tip, base + half, base - half]))
+        head.closeSubpath()
+        painter.fillPath(head, HOVER_ARROW_COLOR)
+
     def _paint_user_shapes(self, painter: QPainter):
         side = self.board_rect().width() / 8.0
         shapes = [(shape, False) for shape in self._user_shapes]
@@ -1205,24 +1183,20 @@ class BoardWidget(QWidget):
             for square, piece in self._glide_cover.items():
                 display_board.set_piece_at(square, piece)  # None removes
 
-        # the engine arrow is painted over the board in paintEvent
-        arrows = []
-        if self.hover_arrow is not None:
-            arrows.append(chess.svg.Arrow(self.hover_arrow[0], self.hover_arrow[1], color=HOVER_ARROW_COLOR))
+        # the arrows are painted over the board in paintEvent
 
         lastmove = board.move_stack[-1] if board.move_stack else None
         svg_data = chess.svg.board(
             board=display_board,
             lastmove=lastmove,
             fill=fill,
-            arrows=arrows,
             colors=colors,
             orientation=self.orientation,
             coordinates=False,
             check=board.king(board.turn) if board.is_check() else None,
         )
 
-        self.renderer.load(_thin_arrows(svg_data).encode("utf-8"))
+        self.renderer.load(svg_data.encode("utf-8"))
         self.repaint()
 
     def paintEvent(self, event):
@@ -1242,9 +1216,12 @@ class BoardWidget(QWidget):
             else:
                 mark.addEllipse(rect.center(), side * TARGET_DOT_RADIUS, side * TARGET_DOT_RADIUS)
             painter.fillPath(mark, TARGET_CAPTURE_COLOR if is_capture else TARGET_MARK_COLOR)
-        # left out if the hover arrow already shows the engine's move
-        if self.engine_arrow is not None and self.engine_arrow != self.hover_arrow:
+        # the thin hover arrow goes on top, so both stay visible when the
+        # hovered book move is the engine's move
+        if self.engine_arrow is not None:
             self._paint_arrow(painter, self.engine_arrow, ENGINE_ARROW_COLOR, ENGINE_ARROW_WIDTH)
+        if self.hover_arrow is not None:
+            self._paint_hover_arrow(painter)
         self._paint_user_shapes(painter)
         t = self._glide_progress
         for piece, origin, target in self._gliding:
@@ -1993,10 +1970,70 @@ def scan_pgn_players(path: str) -> dict[str, list[int]]:
     return players
 
 
+def _choose_folder(parent, title: str, start: str) -> str | None:
+    """Folder chooser whose confirm button says "Select Folder": the stock
+    one (QFileDialog.getExistingDirectory) labels it "Open" on some desktops,
+    as if a file were to be opened. Returns None if cancelled."""
+    dialog = QFileDialog(parent, title, start)
+    dialog.setFileMode(QFileDialog.FileMode.Directory)
+    dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    dialog.setLabelText(QFileDialog.DialogLabel.Accept, "Select Folder")
+    if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.selectedFiles():
+        return None
+    return dialog.selectedFiles()[0]
+
+
+class BookFolderDialog(QDialog):
+    """Shows the book folder setting; the "…" button behind the path opens
+    the folder chooser. The new folder counts only when confirmed with OK."""
+
+    def __init__(self, folder: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(" ")
+        self.setMinimumWidth(520)
+        self.folder = folder
+
+        heading = QLabel("Book Folder")
+        heading_font = heading.font()
+        heading_font.setBold(True)
+        heading_font.setPointSizeF(heading_font.pointSizeF() * 1.4)
+        heading.setFont(heading_font)
+        caption = QLabel("New books are created in this folder, and Open Book starts there.")
+
+        self.path_edit = QLineEdit(folder)
+        self.path_edit.setReadOnly(True)
+        choose_button = QPushButton("…")
+        choose_button.setToolTip("Select another folder")
+        choose_button.setAutoDefault(False)
+        choose_button.setFixedWidth(choose_button.fontMetrics().horizontalAdvance("…") + 24)
+        choose_button.clicked.connect(self._choose)
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.path_edit, 1)
+        path_row.addWidget(choose_button)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(heading)
+        layout.addWidget(caption)
+        layout.addLayout(path_row)
+        layout.addWidget(buttons)
+
+    def _choose(self):
+        folder = _choose_folder(self, "Set Book Folder", self.folder)
+        if folder:
+            self.folder = folder
+            self.path_edit.setText(folder)
+
+
 class NewBookDialog(QDialog):
     """Asks for the name and the repertoire color of a new book. The color
     is mandatory and also shows in the file name as a W_, B_ or WB_ prefix.
-    color: preset that can't be changed (the caller needs that color)."""
+    The book goes into `folder` (the book folder setting), which is shown
+    and can be changed. color: preset that can't be changed (the caller
+    needs that color)."""
 
     def __init__(self, folder: str, color: str | None = None, parent=None):
         super().__init__(parent)
@@ -2024,15 +2061,18 @@ class NewBookDialog(QDialog):
             color_row.addWidget(button)
         color_row.addStretch(1)
 
-        self.path_label = QLabel()
-        self.path_label.setWordWrap(True)
-        self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        folder_button = QPushButton("Folder…")
+        # the book folder setting (File > Set Book Folder); changing it here
+        # changes the setting once the book is created
+        self.folder_label = QLabel()
+        self.folder_label.setWordWrap(True)
+        self.folder_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        folder_button = QPushButton("Change…")
         folder_button.setAutoDefault(False)
         folder_button.clicked.connect(self._choose_folder)
-        path_row = QHBoxLayout()
-        path_row.addWidget(self.path_label, 1)
-        path_row.addWidget(folder_button)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(self.folder_label, 1)
+        folder_row.addWidget(folder_button)
+        self.path_label = QLabel()
 
         buttons = QDialogButtonBox()
         self.create_button = buttons.addButton("Create", QDialogButtonBox.ButtonRole.AcceptRole)
@@ -2045,7 +2085,8 @@ class NewBookDialog(QDialog):
         layout.addWidget(heading)
         layout.addWidget(self.name_edit)
         layout.addLayout(color_row)
-        layout.addLayout(path_row)
+        layout.addLayout(folder_row)
+        layout.addWidget(self.path_label)
         layout.addWidget(buttons)
         self._update()
 
@@ -2067,7 +2108,7 @@ class NewBookDialog(QDialog):
         return os.path.join(self.folder, name + ".bin")
 
     def _choose_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Folder for the new book", self.folder)
+        folder = _choose_folder(self, "Set Book Folder", self.folder)
         if folder:
             self.folder = folder
             self._update()
@@ -2075,8 +2116,9 @@ class NewBookDialog(QDialog):
     def _update(self):
         path = self.path()
         self.create_button.setEnabled(path is not None)
+        self.folder_label.setText(f"Book folder: {self.folder}")
         if path is not None:
-            self.path_label.setText(f"File: {path}")
+            self.path_label.setText(f"File name: {os.path.basename(path)}")
         elif self.color() is None:
             self.path_label.setText("Enter a name and choose a color.")
         else:
@@ -2304,7 +2346,7 @@ class MainWindow(QMainWindow):
                 self.book_path = _default_book_path()
         self._transposition_cache: set[int] | None = None
         self._key_index: dict[int, list[BookEntry]] | None = None  # see _index_entries_by_key
-        self._autoplay_timer = QTimer(self)  # "Play from here" in the line's context menu
+        self._autoplay_timer = QTimer(self)  # "Autoplay from here" in the line's context menu
         speed = _settings().value("play_speed", DEFAULT_PLAY_SPEED, type=str)
         self.play_speed = speed if speed in PLAY_SPEEDS_MS else DEFAULT_PLAY_SPEED
         self._autoplay_timer.setInterval(PLAY_SPEEDS_MS[self.play_speed])
@@ -2536,29 +2578,33 @@ class MainWindow(QMainWindow):
     def _build_menu(self):
         file_menu = self.menuBar().addMenu("File")
 
-        self.import_pgn_action = QAction("Import PGN…", self)
+        self.import_pgn_action = QAction("Import PGN", self)
         self.import_pgn_action.triggered.connect(self._import_pgn_dialog)
         self.import_pgn_action.setEnabled(self.mode == "BUILD")  # View mode: read-only
         file_menu.addAction(self.import_pgn_action)
 
-        new_action = QAction("New Book…", self)
+        new_action = QAction("New Book", self)
         new_action.triggered.connect(lambda: self._new_book_dialog())
         file_menu.addAction(new_action)
 
-        open_action = QAction("Open Book…", self)
+        open_action = QAction("Open Book", self)
         open_action.triggered.connect(self._open_book_dialog)
         file_menu.addAction(open_action)
 
-        book_color_action = QAction("Book Color…", self)
+        book_color_action = QAction("Set Book Color", self)
         book_color_action.triggered.connect(self._book_color_dialog)
         file_menu.addAction(book_color_action)
 
-        select_engine_action = QAction("Select Engine…", self)
+        book_folder_action = QAction("Set Book Folder", self)
+        book_folder_action.triggered.connect(self._book_folder_dialog)
+        file_menu.addAction(book_folder_action)
+
+        select_engine_action = QAction("Select Engine", self)
         select_engine_action.triggered.connect(self._select_engine_dialog)
         file_menu.addAction(select_engine_action)
 
         view_menu = self.menuBar().addMenu("View")
-        speed_menu = view_menu.addMenu("Play Speed")
+        speed_menu = view_menu.addMenu("Autoplay Speed")
         speed_group = QActionGroup(self)  # exclusive: exactly one speed is ticked
         for speed in PLAY_SPEEDS_MS:
             action = speed_menu.addAction(speed)
@@ -2594,7 +2640,7 @@ class MainWindow(QMainWindow):
             coordinates_group.addAction(action)
 
         search_menu = self.menuBar().addMenu("Search")
-        search_fen_action = QAction("by FEN…", self)
+        search_fen_action = QAction("by FEN", self)
         search_fen_action.triggered.connect(lambda: FenSearchDialog(self._search_fen, self).exec())
         search_menu.addAction(search_fen_action)
 
@@ -2625,7 +2671,7 @@ class MainWindow(QMainWindow):
             "Right-click and select <i>Transpositions</i> to see every move order as PGN.</p>"
             "<p>Turn on the engine switch for a blue best-move arrow and the "
             "evaluation in the status bar.</p>"
-            "<p><i>File > Import PGN…</i> adds whole games (build mode).</p>"
+            "<p><i>File > Import PGN</i> adds whole games (build mode).</p>"
             f'<p>See verbose documentation: <a href="{USER_GUIDE_URL}"><b>README (GitHub)</b></a></p>'
         )
         box.exec()
@@ -2648,7 +2694,7 @@ class MainWindow(QMainWindow):
         )
         box.exec()
 
-    NO_ENGINE_HINT = "Please select an engine first via File → Select Engine…"
+    NO_ENGINE_HINT = "Please select an engine first via File → Select Engine"
 
     @staticmethod
     def _engine_path() -> str | None:
@@ -2697,9 +2743,21 @@ class MainWindow(QMainWindow):
                 self.engine_worker = None
                 self._start_engine()
 
+    def _book_folder(self) -> str:
+        """Where new books are created and the Open Book dialog starts:
+        the book folder setting, or the current book's folder as long as
+        none was chosen (or the chosen one is gone)."""
+        folder = _settings().value("book_folder", "", type=str)
+        return folder if folder and os.path.isdir(folder) else os.path.dirname(self.book_path)
+
+    def _book_folder_dialog(self):
+        dialog = BookFolderDialog(self._book_folder(), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.folder != self._book_folder():
+            _settings().setValue("book_folder", dialog.folder)
+
     def _open_book_dialog(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open Polyglot book", "", "Polyglot books (*.bin);;All files (*)"
+            self, "Open Polyglot book", self._book_folder(), "Polyglot books (*.bin);;All files (*)"
         )
         if path:
             self.book_path = path
@@ -2743,9 +2801,11 @@ class MainWindow(QMainWindow):
         """Creates an empty book and makes it the current one. color: the
         book must have this color (not offered for choice). Returns False if
         cancelled."""
-        dialog = NewBookDialog(os.path.dirname(self.book_path), color, self)
+        dialog = NewBookDialog(self._book_folder(), color, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return False
+        if dialog.folder != self._book_folder():
+            _settings().setValue("book_folder", dialog.folder)
         path, color = dialog.path(), dialog.color()
         if os.path.exists(path):
             reply = QMessageBox.question(
@@ -3363,7 +3423,7 @@ class MainWindow(QMainWindow):
         ply = index.row() * 2 + index.column() + 1
         moves = self.game_moves[:ply]
         menu = QMenu(self)
-        play_action = menu.addAction("Play from here")
+        play_action = menu.addAction("Autoplay from here")
         menu.addSeparator()
         copy_fen_action = menu.addAction("Copy FEN")
         copy_pgn_action = menu.addAction("Copy PGN")
@@ -3413,7 +3473,7 @@ class MainWindow(QMainWindow):
             self._stop_autoplay()
 
     def eventFilter(self, obj, event):
-        # installed only while "Play from here" runs
+        # installed only while "Autoplay from here" runs
         # ShortcutOverride: keys bound to a shortcut (arrows, F, E) never arrive as KeyPress
         if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride):
             self._stop_autoplay()
@@ -3562,6 +3622,10 @@ def main():
     app.setOrganizationName(APP_ORG)  # also selects the per-user data folder
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
+    # Linux: the name of the launcher (otb.desktop). The desktop uses it to
+    # connect the window to that launcher, so a pinned OTB icon is the one
+    # that lights up instead of a second, generic one appearing next to it.
+    app.setDesktopFileName("otb")
     # window/taskbar icon; shipped next to otb.py (PyInstaller: --add-data)
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otb_icon.png")
     if os.path.exists(icon_path):

@@ -13,14 +13,14 @@ https://chessprogramming.org/PolyGlot
 
 OTB offers a $\color{#00FF00}{\text{view-mode (green switch)}}$, where moves that you enter in the chessboard are **NOT** saved.   
 In $\color{#FF0000}{\text{build-mode (red board)}}$ every move you enter is immediately saved to the polyglot file without additional user interaction.   
-The default-filename name is book.bin, but you can create your own files via <kbd>File</kbd> &rarr; <kbd>New Book...</kbd>   
+The default-filename name is book.bin, but you can create your own files via <kbd>File</kbd> &rarr; <kbd>New Book</kbd>   
 The currently used book and further status information is displayed in the bottom statusbar.
 
 **<ins>Book color</ins>**: a repertoire is normally built for one side. When you create a book you choose **White**, **Black** or **Both**.   
 The color is stored inside the book file and shown in the file name (`W_`, `B_` or `WB_`) and in the statusbar; the board turns to that side when the book is opened.   
-For an existing book OTB asks for the color when you open it; change it any time via <kbd>File</kbd> &rarr; <kbd>Book Color...</kbd>
+For an existing book OTB asks for the color when you open it; change it any time via <kbd>File</kbd> &rarr; <kbd>Set Book Color</kbd>
 
-You can also expand your opening tree by importing PGN-files via <kbd>File</kbd> &rarr;   <kbd>Import PGN...</kbd> (e.g. PGN's that you exported from other tools).   
+You can also expand your opening tree by importing PGN-files via <kbd>File</kbd> &rarr;   <kbd>Import PGN</kbd> (e.g. PGN's that you exported from other tools).   
 Before the import you can tick one or more players and choose a color: then only the games they played as White, as Black or with both colors are imported.   
 If that color does not fit the book, OTB offers to create a new book for it.
 
@@ -33,9 +33,9 @@ The predecessor-moves to a transposition are marked in red in the bookmove-list.
 Right-click transpositions to see all move orders leading there.\
 Left-click a line or use the cursor up/down keys to load it to the editor, right-click to copy it as PGN.
 
-**<ins>Play from here</ins>**: right-click a move in the current line to play the line automatically from that move to its end. Any click or key stops it.
+**<ins>Autoplay from here</ins>**: right-click a move in the current line to play the line automatically from that move to its end. Any click or key stops it.
 
-**<ins>View menu</ins>**: sets the play speed, the speed of the piece animation and the board coordinates (inside the squares, outside or off).
+**<ins>View menu</ins>**: sets the autoplay speed, the speed of the piece animation and the board coordinates (inside the board, outside the board or none).
 
 ## Install OTB
 
@@ -72,7 +72,7 @@ uv run otb.py
 If you want to use engine-evaluation, toggle the engine-switch.     
 A blue arrow will indicate the engine's top choice, the current engine-evaluation is shown leftmost in the statusbar. 
 Download your preferred engine (e.g. from https://stockfishchess.org/).    
-Then set the location of the engine's executable via <kbd>File</kbd> &rarr; <kbd>Select Engine...</kbd> (will be saved to settings).
+Then set the location of the engine's executable via <kbd>File</kbd> &rarr; <kbd>Select Engine</kbd> (will be saved to settings).
 
 
 ## Features to wish for
