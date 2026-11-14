@@ -35,6 +35,10 @@ Left-click a line or use the cursor up/down keys to load it to the editor, right
 
 **<ins>Autoplay from here</ins>**: right-click a move in the current line to play the line automatically from that move to its end. Any click or key stops it.
 
+**<ins>Arrows and circles</ins>**: draw green arrows on the board with the right mouse button (drag from one square to another), or a circle by right-clicking a square. They are only for looking: they disappear when you leave the position and are never saved.
+
+**<ins>Book folder</ins>**: new books are created in the book folder, which you can change via <kbd>File</kbd> &rarr; <kbd>Set Book Folder</kbd>
+
 **<ins>View menu</ins>**: sets the autoplay speed, the speed of the piece animation and the board coordinates (inside the board, outside the board or none).
 
 ## Install OTB
@@ -48,7 +52,16 @@ Windows may show *"Windows protected your PC"*: click **More info** &rarr; **Run
 
 ---
 
-### Mac / Linux
+### Linux
+Install OTB from the Snap Store, e.g. in Ubuntu's App Center (search for *Opening Tree Builder*), or in a terminal:
+```
+sudo snap install opening-tree-builder
+```
+Stockfish is included. A Flatpak for Flathub is on its way.
+
+---
+
+### Mac (and Linux from source)
 OTB runs directly from source, managed by [`uv`](https://docs.astral.sh/uv/):
 
 **1.** **[⬇ Download OTB (zip)](https://github.com/malo1972/otb/archive/refs/heads/main.zip)** and unzip it into a folder of your choice.
@@ -67,12 +80,17 @@ uv run otb.py
 
 ---
 
-### Use an Engine
+### Engine evaluation
 
-If you want to use engine-evaluation, toggle the engine-switch.     
-A blue arrow will indicate the engine's top choice, the current engine-evaluation is shown leftmost in the statusbar. 
-Download your preferred engine (e.g. from https://stockfishchess.org/).    
-Then set the location of the engine's executable via <kbd>File</kbd> &rarr; <kbd>Select Engine</kbd> (will be saved to settings).
+OTB uses [Stockfish](https://stockfishchess.org/) as its engine. Toggle the engine-switch to turn it on.     
+A blue arrow will indicate the engine's top choice, the current engine-evaluation is shown leftmost in the statusbar.
+
+**Windows and Linux (Snap / Flatpak):** Stockfish is included, nothing to set up.   
+**Mac / running from source:** install Stockfish once, OTB finds it automatically:
+```
+brew install stockfish          # Mac
+sudo apt install stockfish      # Ubuntu / Debian
+```
 
 
 ## Features to wish for

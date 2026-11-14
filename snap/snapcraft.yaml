@@ -1,0 +1,125 @@
+name: opening-tree-builder
+# Title, summary, description, licence and version come from the AppStream
+# metainfo (packaging/linux/ch.gambitgear.OTB.metainfo.xml): the same text
+# the Flatpak uses on Flathub.
+adopt-info: otb
+base: core24
+grade: stable
+confinement: strict
+contact: https://github.com/malo1972/otb/issues
+issues: https://github.com/malo1972/otb/issues
+source-code: https://github.com/malo1972/otb
+website: https://gambitgear.ch/projects/opening-tree-builder.html
+
+platforms:
+  amd64:
+
+apps:
+  opening-tree-builder:
+    command: bin/python3 $SNAP/otb/otb.py
+    desktop: usr/share/applications/ch.gambitgear.OTB.desktop
+    common-id: ch.gambitgear.OTB
+    extensions: [gnome]
+    plugs:
+      - home             # books, PGN files and Documents/OTB in the real home folder
+      - removable-media  # books on USB sticks (connect by hand: snap connect ...)
+
+parts:
+  # Python dependencies only. The PyQt6 wheels bring their own Qt.
+  # Versions as in uv.lock.
+  python-deps:
+    plugin: python
+    source: packaging/linux   # no pyproject.toml here: installs only the packages below
+    python-packages:
+      - PyQt6==6.11.0
+      - PyQt6-Qt6==6.11.2
+      - PyQt6-sip==13.12.0
+      - chess==1.11.2
+    stage-packages:
+      - python3-venv
+      # X11 libraries the Qt xcb platform plugin needs; the rest (Wayland,
+      # fontconfig, EGL, ...) comes with the gnome extension
+      - libxcb-cursor0
+      - libxcb-icccm4
+      - libxcb-image0
+      - libxcb-keysyms1
+      - libxcb-render-util0
+      - libxcb-shape0
+      - libxcb-xinerama0
+      - libxcb-xkb1
+      - libxkbcommon-x11-0
+    # The PyQt6 wheels contain all of Qt (QML, WebEngine, 3D, multimedia,
+    # ...). Keep only what OTB uses: about 75 MB instead of 250 MB.
+    override-build: |
+      craftctl default
+      cd "$CRAFT_PART_INSTALL"/lib/python3*/site-packages
+      rm -rf pip pip-*.dist-info
+      cd PyQt6
+      # Python modules OTB imports
+      for f in Qt*.abi3.so; do
+        case "${f%.abi3.so}" in
+          QtCore|QtGui|QtWidgets|QtSvg|QtSvgWidgets) ;;
+          *) rm "$f" ;;
+        esac
+      done
+      cd Qt6
+      rm -rf qml qsci
+      find translations -type f ! -name 'qtbase_*' -delete
+      # Plugins for display (X11, Wayland), input methods, themes and images
+      for d in plugins/*; do
+        case "${d#plugins/}" in
+          platforms|platformthemes|platforminputcontexts|xcbglintegrations|egldeviceintegrations|wayland-*|imageformats|iconengines|generic) ;;
+          *) rm -rf "$d" ;;
+        esac
+      done
+      rm -f plugins/imageformats/libqpdf.so
+      # Qt libraries: only those the remaining modules and plugins link to
+      needed=$(for f in ../*.abi3.so $(find plugins -name '*.so'); do
+                 LD_LIBRARY_PATH="$PWD/lib" ldd "$f"
+               done | grep -oE '/[^ ]*/Qt6/lib/[^ ]+' | xargs -n1 basename | sort -u)
+      echo "Qt libraries needed:" $needed
+      [ -n "$needed" ] || exit 1
+      for f in lib/*; do
+        echo "$needed" | grep -qxF "$(basename "$f")" || rm -rf "$f"
+      done
+      # Stop the build if a Qt library OTB needs went missing (system
+      # libraries come from the gnome extension at runtime, not checked here)
+      for f in ../Qt*.abi3.so plugins/platforms/libqxcb.so plugins/platforms/libqwayland.so; do
+        if LD_LIBRARY_PATH="$PWD/lib" ldd "$f" | grep -E "lib(Qt6|icu)[^ ]* => not found"; then
+          echo "missing library for $f"; exit 1
+        fi
+      done
+
+  otb:
+    plugin: nil
+    source: .
+    override-build: |
+      install -Dm644 otb.py otb_icon.png LICENSE.txt -t "$CRAFT_PART_INSTALL/otb"
+      install -Dm644 packaging/linux/ch.gambitgear.OTB.metainfo.xml \
+        -t "$CRAFT_PART_INSTALL/usr/share/metainfo"
+      cp -r packaging/linux/icons "$CRAFT_PART_INSTALL/usr/share/"
+      # Desktop file: icon as a path inside the snap. No StartupWMClass:
+      # inside the snap the window identifies itself by the snap's own
+      # desktop file name (see _desktop_file_name in otb.py).
+      install -Dm644 packaging/linux/ch.gambitgear.OTB.desktop \
+        -t "$CRAFT_PART_INSTALL/usr/share/applications"
+      sed -i -e 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/256x256/apps/ch.gambitgear.OTB.png|' \
+             -e '/^StartupWMClass=/d' \
+        "$CRAFT_PART_INSTALL/usr/share/applications/ch.gambitgear.OTB.desktop"
+    parse-info: [usr/share/metainfo/ch.gambitgear.OTB.metainfo.xml]
+
+  # Stockfish, built from source. OTB finds it in otb/engines/ next to otb.py.
+  # Same version as the Windows installer (STOCKFISH_TAG in the workflow).
+  stockfish:
+    plugin: nil
+    source: https://github.com/official-stockfish/Stockfish.git
+    source-tag: sf_19
+    source-depth: 1
+    build-packages: [g++, make, wget]
+    override-build: |
+      cd src
+      # sse41-popcnt runs on practically every x86-64 PC since about 2008
+      make -j"$CRAFT_PARALLEL_BUILD_COUNT" build ARCH=x86-64-sse41-popcnt
+      install -Dm755 stockfish "$CRAFT_PART_INSTALL/otb/engines/stockfish"
+      install -Dm644 ../Copying.txt "$CRAFT_PART_INSTALL/otb/engines/Stockfish-COPYING.txt"
+      install -Dm644 ../AUTHORS "$CRAFT_PART_INSTALL/otb/engines/Stockfish-AUTHORS.txt"

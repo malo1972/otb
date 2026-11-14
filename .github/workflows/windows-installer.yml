@@ -19,6 +19,10 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # Stockfish release bundled as OTB's engine (official build, GPL-3.0):
+      # https://github.com/official-stockfish/Stockfish/releases
+      STOCKFISH_TAG: sf_19
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +43,19 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen
 
+      - name: Download Stockfish
+        # otb.py looks for engines/stockfish.exe next to itself; its licence and
+        # authors list go along, as the GPL asks
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\stockfish.zip"
+          Invoke-WebRequest -Uri "https://github.com/official-stockfish/Stockfish/releases/download/$env:STOCKFISH_TAG/stockfish-windows-x86-64-universal.zip" -OutFile $zip
+          Expand-Archive $zip -DestinationPath "$env:RUNNER_TEMP\sf"
+          New-Item -ItemType Directory -Force engines | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\sf\stockfish\stockfish-windows-x86-64-universal.exe" engines\stockfish.exe
+          Copy-Item "$env:RUNNER_TEMP\sf\stockfish\Copying.txt" engines\Stockfish-COPYING.txt
+          Copy-Item "$env:RUNNER_TEMP\sf\stockfish\AUTHORS" engines\Stockfish-AUTHORS.txt
+
       - name: Build OTB.exe (PyInstaller)
         # --onedir (default) starts faster and triggers far fewer antivirus
         # false positives than --onefile; the installer hides the folder.
@@ -48,6 +65,7 @@ jobs:
           --name OTB --windowed --noconfirm --clean
           --icon "${{ github.workspace }}/packaging/otb.ico"
           --add-data "${{ github.workspace }}/otb_icon.png:."
+          --add-data "${{ github.workspace }}/engines:engines"
           --distpath dist --workpath build --specpath build
 
       - name: Install Inno Setup

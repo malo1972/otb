@@ -23,6 +23,7 @@ import math
 import os
 import random
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -149,7 +150,7 @@ USER_ARROW_WIDTH = 10 / 512 * 8
 USER_CIRCLE_WIDTH = 4 / 64
 DRAG_SOURCE_COLOR = "#ffff0088"       # semi-transparent yellow for start square (hovering)
 SELECTED_SQUARE_COLOR = "#14551e80"   # clicked start square: Lichess' translucent green, rgba(20, 85, 30, 0.5)
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
 APP_ORG = "GambitGear"  # shared by all GambitGear apps: data/settings live under GambitGear/<app>
 APP_NAME = "OTB"
 USER_GUIDE_URL = "https://github.com/malo1972/otb#readme"
@@ -690,10 +691,53 @@ def _default_book_path() -> str:
     """book.bin in the per-user data folder, which is always writable (an
     installed copy's own folder, e.g. under Program Files, is not):
     Linux ~/.local/share/GambitGear/OTB, Windows %APPDATA%\\GambitGear\\OTB,
-    macOS ~/Library/Application Support/GambitGear/OTB."""
-    folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    macOS ~/Library/Application Support/GambitGear/OTB.
+    Inside a Snap or Flatpak that folder is a private one of the sandbox,
+    hidden from the user, so books go to Documents/OTB there instead."""
+    folder = _sandbox_documents_dir()
+    if folder is not None:
+        folder = os.path.join(folder, "OTB")
+    else:
+        folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, "book.bin")
+
+
+def _sandbox_documents_dir() -> str | None:
+    """The user's real Documents folder when running inside a Snap or a
+    Flatpak, None otherwise. A Snap replaces HOME with a folder of its own
+    (the real one is in SNAP_REAL_HOME); a Flatpak keeps it. The folder's
+    name depends on the language (e.g. "Dokumente"): it is read from
+    ~/.config/user-dirs.dirs if the sandbox lets OTB read that file."""
+    if os.environ.get("SNAP"):
+        home = os.environ.get("SNAP_REAL_HOME") or os.path.expanduser("~")
+    elif os.environ.get("FLATPAK_ID"):
+        home = os.path.expanduser("~")
+    else:
+        return None
+    name = "Documents"
+    try:
+        with open(os.path.join(home, ".config", "user-dirs.dirs"), encoding="utf-8") as f:
+            for line in f:
+                match = re.match(r'\s*XDG_DOCUMENTS_DIR="\$HOME/([^"]+)"', line)
+                if match:
+                    name = match.group(1)
+    except OSError:
+        pass
+    return os.path.join(home, name)
+
+
+def _desktop_file_name() -> str:
+    """Name of the launcher (desktop file, without .desktop) that belongs to
+    this OTB. The desktop uses it to connect the window to that launcher, so
+    a pinned OTB icon is the one that lights up instead of a second, generic
+    one appearing next to it."""
+    if os.environ.get("FLATPAK_ID"):
+        return os.environ["FLATPAK_ID"]  # ch.gambitgear.OTB
+    if os.environ.get("SNAP_NAME"):
+        # snapd installs the launcher as <snap>_<app>.desktop; the app is named like the snap
+        return f"{os.environ['SNAP_NAME']}_{os.environ['SNAP_NAME']}"
+    return "otb"  # running from source: a launcher made by hand (otb.desktop)
 
 
 def _migrate_old_settings() -> None:
@@ -2524,6 +2568,7 @@ class MainWindow(QMainWindow):
                 QShortcut(QKeySequence(seq), self, activated=slot)
 
         self._build_menu()
+        _settings().remove("engine_path")  # from versions that let the user choose the engine
         self._update_engine_availability()
         self.setStatusBar(QStatusBar())
         self.statusBar().setSizeGripEnabled(False)
@@ -2599,9 +2644,6 @@ class MainWindow(QMainWindow):
         book_folder_action.triggered.connect(self._book_folder_dialog)
         file_menu.addAction(book_folder_action)
 
-        select_engine_action = QAction("Select Engine", self)
-        select_engine_action.triggered.connect(self._select_engine_dialog)
-        file_menu.addAction(select_engine_action)
 
         view_menu = self.menuBar().addMenu("View")
         speed_menu = view_menu.addMenu("Autoplay Speed")
@@ -2687,6 +2729,8 @@ class MainWindow(QMainWindow):
             "<p>Free and open-source software, licensed under the "
             '<a href="https://www.gnu.org/licenses/gpl-3.0.html">GNU&nbsp;GPL&nbsp;v3</a>.<br>'
             "You may use, share and modify it free of charge.</p>"
+            '<p>Engine evaluation by <a href="https://stockfishchess.org">Stockfish</a>, '
+            "also licensed under the GNU&nbsp;GPL&nbsp;v3.</p>"
             "<hr>"
             "<p>For open-source chess broadcasting hard- and software, tournaments and more visit:</p>"
             '<p style="font-size: x-large;">'
@@ -2694,16 +2738,24 @@ class MainWindow(QMainWindow):
         )
         box.exec()
 
-    NO_ENGINE_HINT = "Please select an engine first via File → Select Engine"
+    NO_ENGINE_HINT = "Stockfish was not found."
 
     @staticmethod
     def _engine_path() -> str | None:
-        path = _settings().value("engine_path", type=str)
-        return path if path and os.path.exists(path) else None
+        """The engine is always Stockfish; there is no choice of engine. The
+        installers bundle it in engines/ next to otb.py (PyInstaller: in
+        _internal/). Running from source, a Stockfish installed on the system
+        is used: on PATH, or in the usual places, since an app started from
+        the desktop may not get the terminal's PATH."""
+        bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)), "engines",
+                               "stockfish.exe" if sys.platform == "win32" else "stockfish")
+        candidates = [bundled, shutil.which("stockfish"),
+                      "/usr/games/stockfish", "/usr/local/bin/stockfish", "/opt/homebrew/bin/stockfish"]
+        return next((path for path in candidates if path and os.access(path, os.X_OK)), None)
 
     def _update_engine_availability(self):
-        """Engine switch is unavailable (faded, explains itself) until a
-        valid engine executable has been selected, e.g. right after install."""
+        """Engine switch is unavailable (faded, explains itself) if no
+        Stockfish can be found, e.g. running from source without one."""
         available = self._engine_path() is not None
         self.engine_toggle.set_unavailable(not available)
         tip = "Engine (E)" if available else self.NO_ENGINE_HINT
@@ -2721,27 +2773,16 @@ class MainWindow(QMainWindow):
         box.setWindowTitle(" ")
         box.setIcon(QMessageBox.Icon.Information)
         box.setText(self.NO_ENGINE_HINT)
-        box.setInformativeText(
-            "OTB works with any UCI chess engine, e.g. Stockfish (free, stockfishchess.org)."
-        )
-        select_button = box.addButton("Select Engine…", QMessageBox.ButtonRole.AcceptRole)
+        if sys.platform == "win32":
+            how = "It comes with the installer: please reinstall OTB."
+        elif sys.platform == "darwin":
+            how = "Install it with Homebrew (brew install stockfish), then restart OTB."
+        else:
+            how = ("Install it with your package manager, e.g. sudo apt install stockfish,\n"
+                   "then restart OTB.")
+        box.setInformativeText(how)
         box.addButton(QMessageBox.StandardButton.Close)
         box.exec()
-        if box.clickedButton() is select_button:
-            self._select_engine_dialog()
-
-    def _select_engine_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select UCI engine executable", "", "All files (*)"
-        )
-        if path:
-            settings = _settings()
-            settings.setValue("engine_path", path)
-            self._update_engine_availability()
-            if self.engine_active:
-                self._stop_engine()
-                self.engine_worker = None
-                self._start_engine()
 
     def _book_folder(self) -> str:
         """Where new books are created and the Open Book dialog starts:
@@ -3100,9 +3141,8 @@ class MainWindow(QMainWindow):
         if self.engine_worker is None:
             path = self._engine_path()
             if path is None:
-                # No usable engine (e.g. right after install, or the file was
-                # removed): never open a file dialog from here -- switch back
-                # off and explain, whatever turned the switch on.
+                # No Stockfish (e.g. running from source without one): switch
+                # back off and explain, whatever turned the switch on.
                 self._update_engine_availability()
                 self._sync_engine_toggle()
                 self._explain_no_engine()
@@ -3622,10 +3662,7 @@ def main():
     app.setOrganizationName(APP_ORG)  # also selects the per-user data folder
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
-    # Linux: the name of the launcher (otb.desktop). The desktop uses it to
-    # connect the window to that launcher, so a pinned OTB icon is the one
-    # that lights up instead of a second, generic one appearing next to it.
-    app.setDesktopFileName("otb")
+    app.setDesktopFileName(_desktop_file_name())  # Linux taskbar: see _desktop_file_name
     # window/taskbar icon; shipped next to otb.py (PyInstaller: --add-data)
     icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "otb_icon.png")
     if os.path.exists(icon_path):

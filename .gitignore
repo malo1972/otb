@@ -16,3 +16,17 @@ __pycache__/
 build/
 dist/
 packaging/Output/
+
+# Stockfish, downloaded by the installer build (never commit the binary)
+engines/
+
+# snapcraft build output
+parts/
+stage/
+prime/
+*.snap
+
+# flatpak-builder output
+.flatpak-builder/
+build-dir/
+repo/

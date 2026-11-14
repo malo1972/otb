@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Opening Tree Builder
+GenericName=Chess Opening Repertoire
+Comment=Build your chess opening repertoire as a Polyglot book
+Icon=ch.gambitgear.OTB
+Exec=otb
+Terminal=false
+Categories=Game;BoardGame;
+Keywords=chess;opening;repertoire;polyglot;book;pgn;stockfish;
+StartupWMClass=ch.gambitgear.OTB

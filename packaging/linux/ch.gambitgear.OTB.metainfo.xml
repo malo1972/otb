@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Store page text for Flathub and the Snap Store (snapcraft: adopt-info) -->
+<component type="desktop-application">
+  <id>ch.gambitgear.OTB</id>
+  <name>Opening Tree Builder</name>
+  <summary>Chess opening repertoire builder</summary>
+  <developer id="ch.gambitgear">
+    <name>GambitGear</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <description>
+    <p>
+      Opening Tree Builder (OTB) lets you build and keep your chess opening
+      repertoire offline, in a single Polyglot book file that other chess
+      programs and engines can use too.
+    </p>
+    <ul>
+      <li>View mode to explore your book, build mode to add every move you play</li>
+      <li>Import games from PGN files, filtered by player and color</li>
+      <li>One book per color: White, Black or both</li>
+      <li>Transpositions are detected and every move order can be shown</li>
+      <li>Engine evaluation with the built-in Stockfish</li>
+      <li>Autoplay through a line, piece animation, board coordinates</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">ch.gambitgear.OTB.desktop</launchable>
+  <provides>
+    <binary>otb</binary>
+  </provides>
+
+  <categories>
+    <category>Game</category>
+    <category>BoardGame</category>
+  </categories>
+  <keywords>
+    <keyword>chess</keyword>
+    <keyword>opening</keyword>
+    <keyword>repertoire</keyword>
+    <keyword>polyglot</keyword>
+    <keyword>pgn</keyword>
+  </keywords>
+
+  <url type="homepage">https://gambitgear.ch/projects/opening-tree-builder.html</url>
+  <url type="bugtracker">https://github.com/malo1972/otb/issues</url>
+  <url type="vcs-browser">https://github.com/malo1972/otb</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>The board with the book moves and the current line</caption>
+      <image>https://raw.githubusercontent.com/malo1972/otb/main/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1"/>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <releases>
+    <release version="1.2" date="2026-11-14">
+      <description>
+        <p>Stockfish is built in, so engine evaluation works without any setup.
+        Arrows and circles can be drawn on the board with the right mouse
+        button, the book folder is a setting, and OTB is now available for
+        Linux as a Snap and a Flatpak.</p>
+      </description>
+    </release>
+    <release version="1.1" date="2026-11-12">
+      <description>
+        <p>Book colors, a New Book dialog, PGN import filtered by player and
+        color, much faster handling of big books, piece animation, autoplay
+        and a board in the Lichess look.</p>
+      </description>
+    </release>
+    <release version="1.0" date="2026-10-15">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>
